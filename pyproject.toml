@@ -27,8 +27,23 @@ dependencies = [
   "pyyaml>=6",
 ]
 
+[project.urls]
+Homepage = "https://github.com/"
+Documentation = "https://github.com/"
+Issues = "https://github.com/"
+
+[project.scripts]
+splice = "splice.cli:main"
+splice-demo-calculator = "splice.examples.calculator_demo:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["splice"]
+
+[tool.hatch.build]
+include = [
+  "splice/py.typed",
+  "splice/examples/generic_operand.yaml",
+]
 
 [tool.hatch.build.targets.sdist]
 include = ["splice", "pyproject.toml", "README.md", "LICENSE", "tests"]

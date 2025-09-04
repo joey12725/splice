@@ -7,7 +7,7 @@ import multiprocessing as mp
 import signal
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, List
 
 from .config import SpliceConfig
 from .errors import ExecutionError, SandboxViolation
@@ -100,6 +100,11 @@ def _build_restricted_builtins(*, allow_fs: bool) -> dict[str, Any]:
 
     allowed: dict[str, Any] = {name: getattr(_builtins, name) for name in safe_names if hasattr(_builtins, name)}
 
+    # Common exception classes to allow raising/catching inside sandboxed code
+    for exc_name in ("BaseException", "Exception", "ValueError", "TypeError", "RuntimeError"):
+        if hasattr(_builtins, exc_name):
+            allowed[exc_name] = getattr(_builtins, exc_name)
+
     # File system access via open is disallowed unless configured
     if allow_fs and hasattr(_builtins, "open"):
         allowed["open"] = getattr(_builtins, "open")
@@ -171,7 +176,7 @@ def _preflight_ast_checks(code: str, *, allowlist: set[str], allow_fs: bool, all
                 raise SandboxViolation(f"Use of '{node.id}' is not allowed in sandbox")
 
 
-def _worker(code: str, signature_text: str, kwargs: dict[str, Any], cfg: SpliceConfig, conn) -> None:  # type: ignore[no-untyped-def]
+def _worker(code: str, signature_text: str, kwargs: dict[str, Any], cfg: SpliceConfig, conn, extra_sys_paths: Optional[List[str]] = None) -> None:  # type: ignore[no-untyped-def]
     """Worker process entry point: execute user code in restricted env and return value via pipe."""
 
     try:
@@ -188,6 +193,13 @@ def _worker(code: str, signature_text: str, kwargs: dict[str, Any], cfg: SpliceC
         sandbox_builtins["__import__"] = limited_import
 
         sandbox_globals: dict[str, Any] = {"__builtins__": sandbox_builtins}
+
+        # Prepend extra sys.path entries for per-session environments if provided
+        if extra_sys_paths:
+            import sys as _sys
+            for p in extra_sys_paths:
+                if p not in _sys.path:
+                    _sys.path.insert(0, p)
 
         # Pre-import allowed modules to make them available without import lines
         for mod_name in sorted(allowlist):
@@ -242,15 +254,19 @@ class Executor:
         config: SpliceConfig,
         *,
         timeout_seconds: float | None = 10.0,
+        extra_sys_paths: Optional[list[str]] = None,
     ) -> Any:
         """Execute generated function in a sandboxed child process and return the value.
 
         Raises SandboxViolation on disallowed operations, ExecutionError on runtime failures.
         """
 
-        ctx = mp.get_context("spawn")
+        try:
+            ctx = mp.get_context("fork")
+        except ValueError:
+            ctx = mp.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe()
-        proc = ctx.Process(target=_worker, args=(code, signature, dict(call_kwargs), config, child_conn))
+        proc = ctx.Process(target=_worker, args=(code, signature, dict(call_kwargs), config, child_conn, list(extra_sys_paths or [])))
         proc.daemon = True
         proc.start()
         child_conn.close()

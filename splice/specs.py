@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .errors import SpecError
+from .errors import SpecError, SpecNotFoundError
 from .paths import find_splice_directory
 
 
@@ -37,13 +38,35 @@ def _require_field(obj: dict[str, Any], key: str, ctx: str) -> Any:
     return obj[key]
 
 
+def _validate_examples(examples: list[dict[str, str]], signature: str) -> None:
+    """Phase 9: optionally verify examples are shaped as function snippets.
+
+    We perform a lightweight check: ensure each example function contains a
+    `def <name>(` matching the signature's function name. This avoids strict
+    parsing but catches obvious mismatches.
+    """
+    import re
+
+    m = re.match(r"\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", signature)
+    if not m:
+        return
+    fn_name = m.group(1)
+    for idx, ex in enumerate(examples, start=1):
+        func_text = str(ex.get("function", ""))
+        if not func_text.strip():
+            continue
+        if f"def {fn_name}(" not in func_text:
+            raise SpecError(f"Example {idx} function does not match signature name '{fn_name}'")
+
+
+@lru_cache(maxsize=128)
 def load_function_spec(name: str, start_path: Path | None = None) -> FunctionSpec:
     """Load a function spec YAML by name from `.splice/functions/<name>.yaml`."""
 
     base = find_splice_directory(start_path)
     spec_path = base / "functions" / f"{name}.yaml"
     if not spec_path.exists():
-        raise SpecError(f"Spec not found: {spec_path}")
+        raise SpecNotFoundError(f"Spec not found: {spec_path}")
 
     try:
         data: dict[str, Any] = yaml.safe_load(spec_path.read_text()) or {}
@@ -87,6 +110,15 @@ def load_function_spec(name: str, start_path: Path | None = None) -> FunctionSpe
     examples = data.get("examples", [])
     if not isinstance(examples, list):
         raise SpecError("examples must be a list")
+
+    # Phase 9: verify examples reference the correct function name
+    try:
+        _validate_examples(list(examples), signature)
+    except SpecError:
+        raise
+    except Exception:
+        # Non-fatal; only enforce clear mismatches
+        pass
 
     return FunctionSpec(
         name=str(_require_field(data, "name", ctx="spec")),

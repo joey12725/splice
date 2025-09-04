@@ -1,14 +1,14 @@
-# Splice (Phases 0–3)
+# Splice
 
-Minimal scaffolding through Phase 3.
+Session-scoped LLM code executor with sandboxing, caching, and a simple CLI.
 
-Install (editable):
+### Install
 
 ```bash
 pip install -e .[dev]
 ```
 
-## Environment
+### Environment
 
 Set your OpenRouter API key (do not hardcode):
 
@@ -16,33 +16,60 @@ Set your OpenRouter API key (do not hardcode):
 export OPENROUTER_API_KEY="sk-or-..."
 ```
 
-## Usage
+### Quickstart
 
-Imports and Phase 2 prompt bundling:
+```bash
+# Initialize a local workspace
+splice init
+
+# Create a function spec skeleton
+splice make-func my_op
+
+# Generate docs for types/classes into .splice/context
+splice docgen --types collections.Counter datetime.datetime
+```
+
+Run a function with session-scoped caching:
 
 ```python
-from splice import Splice, Session, SpliceConfig, bundle_prompt
+from splice import Splice, Session
 
-splice = Splice()
 s = Session.ensure()
-
-# Load config (defaults if .splice/splice.yaml missing)
-cfg = SpliceConfig.load()
-
-# Suppose you already loaded a FunctionSpec as `spec`
-# from splice import FunctionSpec; spec = splice.spec("generic_operand")
-bundle = bundle_prompt(spec, cfg, session_prompt="Compute geometric mean of a and b")
+result = Splice().run(
+    "my_op",
+    session=s,
+    prompt="Return (a + b) / 2",
+    a=4.0,
+    b=6.0,
+)
+print(result)
 ```
 
-Phase 3: generate code via OpenRouter:
+### Demo: Calculator with dynamic `?` operator
 
-```python
-from splice import OpenRouterClient
+This repository includes a demo calculator that supports `+ - * /` and a special `?` operator. The first time you use `?` in a session, it prompts you to describe the behavior in natural language, then uses Splice to generate and cache an implementation for the rest of the session.
 
-client = OpenRouterClient()
-code_str = client.generate_code(bundle, cfg)
-print(code_str)
+Run interactively:
+
+```bash
+splice-demo-calculator
+# enter: 5?9
+# define behavior, e.g. "return a**2 + b**2"
 ```
 
+Or one-off:
 
+```bash
+splice-demo-calculator "3?4"
+```
+
+### Development
+
+Run tests and linters:
+
+```bash
+pytest -q
+ruff check .
+mypy splice
+```
 

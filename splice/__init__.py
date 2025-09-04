@@ -9,7 +9,7 @@ from .specs import FunctionSpec
 from .prompt import PromptBundle, bundle_prompt
 from .client import OpenRouterClient, GenerationError
 from .executor import Executor
-from .errors import ExecutionError, SandboxViolation
+from .errors import ExecutionError, SandboxViolation, SpecNotFoundError
 
 __all__ = [
     "Splice",
@@ -23,6 +23,7 @@ __all__ = [
     "Executor",
     "ExecutionError",
     "SandboxViolation",
+    "SpecNotFoundError",
 ]
 
 

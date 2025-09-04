@@ -1,0 +1,17 @@
+name: generic_operand
+version: "0.1.0"
+description: ""
+prompt: ""
+system_prompt: |
+  Output exactly one Python function that matches the signature and contracts.
+contracts:
+  signature: "def generic_operand(a: float, b: float) -> float"
+  inputs:
+    a: float
+    b: float
+  output: float
+context_docs: []
+type_sources: []
+examples: []
+
+
