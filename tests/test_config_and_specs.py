@@ -18,7 +18,7 @@ def test_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     # No file present -> defaults
     monkeypatch.chdir(tmp_path)
     cfg = SpliceConfig.load()
-    assert cfg.model.name == "gpt-5"
+    assert cfg.model.name == "openai/gpt-5-mini"
     assert cfg.sessions.store == "sqlite"
     assert cfg.logging.database == ".splice/db.sqlite"
 
@@ -29,7 +29,7 @@ def test_config_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         tmp_path / ".splice/splice.yaml",
         """
         model:
-          name: gpt-5
+          name: openai/gpt-5-mini
           temperature: 0.3
         sessions:
           store: sqlite

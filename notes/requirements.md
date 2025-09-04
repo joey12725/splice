@@ -21,7 +21,7 @@
 ```yaml
 # .splice/splice.yaml
 model:
-  name: gpt-5                 # string; OpenRouter model id (provider implied elsewhere)
+  name: openai/gpt-5-mini     # string; OpenRouter model id (provider implied elsewhere)
   temperature: 0.2
   reasoning: 1                # reasoning strength if supported
   system_prompt: |

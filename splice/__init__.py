@@ -8,6 +8,8 @@ from .core import Session, Splice
 from .specs import FunctionSpec
 from .prompt import PromptBundle, bundle_prompt
 from .client import OpenRouterClient, GenerationError
+from .executor import Executor
+from .errors import ExecutionError, SandboxViolation
 
 __all__ = [
     "Splice",
@@ -18,6 +20,9 @@ __all__ = [
     "bundle_prompt",
     "OpenRouterClient",
     "GenerationError",
+    "Executor",
+    "ExecutionError",
+    "SandboxViolation",
 ]
 
 

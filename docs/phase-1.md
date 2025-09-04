@@ -8,7 +8,7 @@ Phase 1 introduces YAML loaders for the global config (`.splice/splice.yaml`) an
 Define model/runtime defaults once per project.
 
 ### Defaults
-- `model`: `name=gpt-5`, `temperature=0.2`, `reasoning=1`, `system_prompt` instructs the model to output exactly one Python function matching the signature.
+- `model`: `name=openai/gpt-5-mini`, `temperature=0.2`, `reasoning=1`, `system_prompt` instructs the model to output exactly one Python function matching the signature.
 - `sessions`: `store=sqlite`, `ttl=24h`.
 - `logging`: `database=.splice/db.sqlite`, `log_inputs=false`, `log_outputs=false`.
 - `sandbox`: `allow_imports=["math", "statistics", "numpy"]`, `allow_fs=false`, `allow_net=false`, `allow_subprocess=false`.
@@ -18,7 +18,7 @@ Define model/runtime defaults once per project.
 ### Example
 ```yaml
 model:
-  name: gpt-5
+  name: openai/gpt-5-mini
   temperature: 0.2
   reasoning: 1
   system_prompt: |

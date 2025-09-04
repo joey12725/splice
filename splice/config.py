@@ -14,7 +14,7 @@ DEFAULT_ALLOW_IMPORTS: list[str] = ["math", "statistics", "numpy"]
 
 @dataclass
 class ModelConfig:
-    name: str = "gpt-5"
+    name: str = "openai/gpt-5-mini"
     temperature: float = 0.2
     reasoning: int = 1
     system_prompt: str = (

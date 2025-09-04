@@ -67,5 +67,8 @@ pretty = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "live: marks tests that call the live OpenRouter API",
+]
 
 

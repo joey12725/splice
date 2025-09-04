@@ -95,10 +95,25 @@ class OpenRouterClient:
             ],
         }
 
-        # A few providers require this field; we include when non-zero.
+        # A few providers require this field with enum values
+        # Map numeric strengths to valid enums; allow direct string passthrough
         reasoning_strength = getattr(config.model, "reasoning", None)
-        if isinstance(reasoning_strength, (int, float)) and reasoning_strength:
-            payload["reasoning"] = {"effort": reasoning_strength}
+        effort_value: Optional[str] = None
+        if isinstance(reasoning_strength, str):
+            lowered = reasoning_strength.lower().strip()
+            if lowered in {"minimal", "low", "medium", "high"}:
+                effort_value = lowered
+        elif isinstance(reasoning_strength, (int, float)):
+            if reasoning_strength <= 0:
+                effort_value = None
+            elif reasoning_strength < 2:
+                effort_value = "low"
+            elif reasoning_strength < 3:
+                effort_value = "medium"
+            else:
+                effort_value = "high"
+        if effort_value:
+            payload["reasoning"] = {"effort": effort_value}
 
         attempts = max(int(config.retries.generation), 0) + 1
         last_error: Exception | None = None
