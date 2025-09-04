@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .paths import find_splice_directory
+from .paths import require_splice_directory
 
 
 def _import_from_string(path: str) -> Any:
@@ -56,7 +56,7 @@ def generate_docs(sources: list[DocSource], *, start_path: Path | None = None) -
     Returns a list of paths that exist after the call.
     """
 
-    base = find_splice_directory(start_path)
+    base = require_splice_directory(start_path)
     ctx_dir = base / "context"
     ctx_dir.mkdir(parents=True, exist_ok=True)
 

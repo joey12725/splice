@@ -73,11 +73,11 @@ class Splice:
         from .executor import Executor
         from .prompt import bundle_prompt
         from .store import ArtifactStore, ArtifactKey
-        from .paths import find_splice_directory
+        from .paths import require_splice_directory
         from .deps import prepare_dependencies
         import time
 
-        base = find_splice_directory(start_path)
+        base = require_splice_directory(start_path)
         # Load config relative to base so tests using tmp .splice work
         from .config import SpliceConfig
         cfg = SpliceConfig.load(self._config_path, start_path=base)

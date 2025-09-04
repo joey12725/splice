@@ -4,13 +4,17 @@ import argparse
 import sys
 import ast
 import re
+import os
+import subprocess
+import textwrap
 from pathlib import Path
 from typing import List, Optional, Iterable, Tuple
 
 import yaml
+import httpx
 
 from .docgen import DocSource, generate_docs
-from .paths import find_splice_directory
+from .paths import find_splice_directory, require_splice_directory
 from .config import SpliceConfig
 from .client import OpenRouterClient, GenerationError
 
@@ -77,7 +81,7 @@ def cmd_cache_purge(start_path: Path | None = None) -> int:
     from .store import ArtifactStore
     from .config import SpliceConfig
 
-    base = find_splice_directory(start_path)
+    base = require_splice_directory(start_path)
     cfg = SpliceConfig.load(start_path=base)
     db_path = Path(cfg.logging.database)
     if not db_path.is_absolute():
@@ -210,10 +214,10 @@ def _generate_questions_for_symbol(client: OpenRouterClient, cfg: SpliceConfig, 
     sys_msg = {
         "role": "system",
         "content": (
-            "You generate the minimal set of questions needed to write excellent docs. "
-            "Ask as few questions as possible (0 if sufficient). "
-            "Never ask questions whose answers are clear from the provided code or project context. "
-            "Output each question on its own line, with no numbering, bullets, or markdown."
+            "You generate the minimal questions needed to write excellent docs. "
+            "Prefer zero questions; only ask if absolutely necessary to resolve ambiguity. "
+            "Never ask about details obvious from the provided code or project context. "
+            "Output each question on its own line with no numbering/bullets/markdown."
         ),
     }
     base = find_splice_directory(None)
@@ -231,7 +235,7 @@ def _generate_questions_for_symbol(client: OpenRouterClient, cfg: SpliceConfig, 
     if ctx_docs:
         user_parts.append("Existing context docs (filenames):\n" + ctx_list)
     user_parts.append(
-        "Produce 0–10 questions, only those strictly necessary for comprehensive docs."
+        "Produce 0–3 questions total; return 0 if the inputs suffice."
     )
     user_msg = {"role": "user", "content": "\n\n".join(user_parts)}
     try:
@@ -248,8 +252,8 @@ def _generate_questions_for_symbol(client: OpenRouterClient, cfg: SpliceConfig, 
         q = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s*", "", q)
         if q:
             questions.append(q)
-    # Cap at 10 as requested
-    return questions[:10]
+    # Cap at 3 as requested
+    return questions[:3]
 
 
 def _generate_doc_for_symbol(client: OpenRouterClient, cfg: SpliceConfig, *, module: str, name: str, kind: str, code: str, qa: list[tuple[str, str]]) -> str:
@@ -428,7 +432,10 @@ def run_wizard_docgen(start_path: Path | None = None) -> None:
             qa.append((q, a))
         doc_text = _generate_doc_for_symbol(client, cfg, module=module, name=name, kind=kind, code=code, qa=qa)
         safe_module = module.replace("/", ".").replace(" ", "_")
-        out_path = (base / "context" / f"{safe_module}.{name}.md")
+        # Ensure context directory exists before writing
+        ctx_dir = base / "context"
+        ctx_dir.mkdir(parents=True, exist_ok=True)
+        out_path = (ctx_dir / f"{safe_module}.{name}.md")
         if out_path.exists():
             print(f"Doc already exists, updating: {out_path}")
         out_path.write_text(doc_text)
@@ -456,6 +463,622 @@ def run_init_wizard(start_path: Path | None = None) -> None:
         print(f"Doc wizard encountered an error: {exc}")
 
 
+# -------- Interactive Edit Menu (TUI) --------
+
+def _clear_screen() -> None:
+    try:
+        print("\033c", end="")
+    except Exception:
+        pass
+
+
+def _title(text: str) -> None:
+    print(f"\n\x1b[1m{text}\x1b[0m")
+    print("=" * len(text))
+
+
+def _pause() -> None:
+    try:
+        input("\nPress Enter to continue...")
+    except Exception:
+        pass
+
+
+def _choose(prompt_text: str, options: list[tuple[str, str]]) -> str:
+    for key, label in options:
+        print(f"  [{key}] {label}")
+    while True:
+        choice = input(f"\n{prompt_text} ").strip().lower()
+        if any(choice == k for k, _ in options):
+            return choice
+        print("Please enter one of:", ", ".join(k for k, _ in options))
+
+
+def _ensure_workspace_or_offer_init(start_path: Path | None) -> Path:
+    base = find_splice_directory(start_path)
+    if not base.exists():
+        _title("No Splice workspace found")
+        print("We didn't find a .splice/ directory in this project.")
+        print("Splice can create one with sensible defaults.")
+        resp = input("Create it now? [Y/n]: ").strip().lower()
+        if resp in {"", "y", "yes"}:
+            return cmd_init(start_path=start_path)
+    return base
+
+
+def _edit_file_in_editor(path: Path) -> None:
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL")
+    if editor:
+        try:
+            subprocess.run(["sh", "-lc", f"${{EDITOR:-{editor}}} '{path}'"], check=False)
+            return
+        except Exception:
+            pass
+    # Fallback: print location
+    print(f"Open this file in your editor: {path}")
+
+
+def _list_function_specs(base: Path) -> list[Path]:
+    try:
+        return sorted((base / "functions").glob("*.yaml"))
+    except Exception:
+        return []
+
+
+def _parse_inputs_csv(pairs: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in pairs.split(","):
+        if not item.strip():
+            continue
+        if ":" in item:
+            name, typ = item.split(":", 1)
+            result[name.strip()] = typ.strip()
+        else:
+            # If no type provided, default to str to avoid YAML None
+            result[item.strip()] = "str"
+    return result
+
+
+def _menu_functions(base: Path) -> None:
+    while True:
+        _clear_screen()
+        _title("Functions")
+        print("Create or edit function specs stored under .splice/functions/\n")
+        specs = _list_function_specs(base)
+        if specs:
+            print("Existing specs:")
+            for p in specs:
+                print(f"  - {p.name}")
+        else:
+            print("No function specs yet.")
+
+        choice = _choose(
+            "Choose an option:",
+            [
+                ("a", "Add new function spec"),
+                ("e", "Edit existing function spec"),
+                ("b", "Back to main menu"),
+            ],
+        )
+        if choice == "b":
+            return
+        if choice == "a":
+            name = input("Function name: ").strip()
+            if not name:
+                print("Name is required.")
+                _pause()
+                continue
+            mode = _choose("Template style:", [("m", "minimal"), ("o", "opinionated auto")])
+            path = _write_function_spec(name, base, minimal=(mode == "m"))
+            print(f"Created function spec at {path}")
+            _pause()
+            continue
+        if choice == "e":
+            specs = _list_function_specs(base)
+            if not specs:
+                print("No specs to edit.")
+                _pause()
+                continue
+            # Choose file
+            print("\nSelect a spec to edit:")
+            for idx, p in enumerate(specs, 1):
+                print(f"  [{idx}] {p.name}")
+            sel = input("Enter number (or blank to cancel): ").strip()
+            if not sel.isdigit() or int(sel) < 1 or int(sel) > len(specs):
+                continue
+            target = specs[int(sel) - 1]
+
+            # Choose how to edit
+            how = _choose("Edit method:", [("g", "Guided fields"), ("v", "Open in $EDITOR")])
+            if how == "v":
+                _edit_file_in_editor(target)
+                continue
+
+            # Guided editing
+            try:
+                data = yaml.safe_load(target.read_text()) or {}
+            except Exception as exc:
+                print(f"Failed to parse YAML: {exc}")
+                _pause()
+                continue
+
+            print("\nLeave any field blank to keep current value.")
+            desc = input(f"description [{data.get('description', '')}]: ").strip() or data.get("description", "")
+            prompt_txt = input(f"prompt [{data.get('prompt', '')}]: ").strip() or data.get("prompt", "")
+            sys_prompt = input(
+                f"system_prompt [{(data.get('system_prompt') or '')[:40]}... if long]: "
+            ).strip() or data.get("system_prompt", "")
+
+            contracts = data.get("contracts") or {}
+            signature = input(f"contracts.signature [{contracts.get('signature', '')}]: ").strip() or contracts.get("signature", "")
+            current_inputs = contracts.get("inputs", {})
+            inputs_csv = ", ".join([f"{k}: {v}" for k, v in current_inputs.items()])
+            new_inputs = input(f"contracts.inputs (name: type, ...) [{inputs_csv}]: ").strip()
+            output_type = input(f"contracts.output [{contracts.get('output', '')}]: ").strip() or contracts.get("output", "")
+
+            # Apply changes
+            data["description"] = desc
+            data["prompt"] = prompt_txt
+            data["system_prompt"] = sys_prompt
+            data.setdefault("contracts", {})
+            data["contracts"]["signature"] = signature
+            if new_inputs:
+                data["contracts"]["inputs"] = _parse_inputs_csv(new_inputs)
+            else:
+                data["contracts"]["inputs"] = current_inputs
+            data["contracts"]["output"] = output_type
+
+            try:
+                target.write_text(yaml.safe_dump(data, sort_keys=False))
+                print(f"Updated {target}")
+            except Exception as exc:
+                print(f"Failed to write file: {exc}")
+            _pause()
+
+
+def _menu_docs(base: Path) -> None:
+    while True:
+        _clear_screen()
+        _title("Documentation")
+        print(textwrap.dedent(
+            """
+            Generate or edit context documentation stored under .splice/context/
+            - Class docs: point at Python classes/types by import path
+            - URL docs: scrape and summarize docs from a web page
+            """
+        ).strip())
+        choice = _choose(
+            "Choose an option:",
+            [
+                ("c", "Generate docs for Python classes (guided)"),
+                ("u", "Generate docs from external URL"),
+                ("e", "Edit an existing doc in $EDITOR"),
+                ("b", "Back to main menu"),
+            ],
+        )
+        if choice == "b":
+            return
+        if choice == "c":
+            try:
+                run_wizard_docgen(start_path=base)
+            except KeyboardInterrupt:
+                pass
+            _pause()
+            continue
+        if choice == "u":
+            name = input("Target doc name (e.g., pandas): ").strip()
+            url = input("Documentation URL: ").strip()
+            if not name or not url:
+                print("Name and URL are required.")
+                _pause()
+                continue
+            _generate_docs_from_url(name, url, start_path=base)
+            _pause()
+            continue
+        if choice == "e":
+            ctx_dir = base / "context"
+            items = sorted(ctx_dir.glob("*.md")) if ctx_dir.is_dir() else []
+            if not items:
+                print("No docs to edit.")
+                _pause()
+                continue
+            print("\nSelect a doc:")
+            for idx, p in enumerate(items, 1):
+                print(f"  [{idx}] {p.name}")
+            sel = input("Enter number (or blank to cancel): ").strip()
+            if not sel.isdigit() or int(sel) < 1 or int(sel) > len(items):
+                continue
+            target = items[int(sel) - 1]
+            _edit_file_in_editor(target)
+
+
+def _menu_config(base: Path) -> None:
+    while True:
+        _clear_screen()
+        _title("Configuration")
+        cfg_path = base / "splice.yaml"
+        cfg = _load_yaml_config(cfg_path)
+        print("Current config summary:\n")
+        model = (cfg.get("model") or {}).copy()
+        sandbox = (cfg.get("sandbox") or {}).copy()
+        deps = (cfg.get("dependencies") or {}).copy()
+        retries = (cfg.get("retries") or {}).copy()
+        print(f"  model.name: {model.get('name', '')}")
+        print(f"  model.reasoning: {model.get('reasoning', '')}")
+        print(f"  sandbox.allow_imports: {', '.join(sandbox.get('allow_imports', []) or [])}")
+        print(f"  sandbox.allow_fs: {sandbox.get('allow_fs', False)}")
+        print(f"  sandbox.allow_net: {sandbox.get('allow_net', False)}")
+        print(f"  sandbox.allow_subprocess: {sandbox.get('allow_subprocess', False)}")
+        print(f"  dependencies.policy: {deps.get('policy', '')}")
+        print(f"  retries.generation: {retries.get('generation', '')}")
+        print(f"  retries.repair: {retries.get('repair', '')}\n")
+
+        choice = _choose(
+            "Choose a setting to update:",
+            [
+                ("m", "Model name"),
+                ("r", "Reasoning effort"),
+                ("s", "System prompt (inline text)"),
+                ("i", "Sandbox allowed imports"),
+                ("f", "Sandbox allow filesystem on/off"),
+                ("n", "Sandbox allow network on/off"),
+                ("p", "Sandbox allow subprocess on/off"),
+                ("d", "Dependencies policy"),
+                ("g", "Retries: generation attempts"),
+                ("e", "Retries: repair attempts"),
+                ("b", "Back to main menu"),
+            ],
+        )
+        if choice == "b":
+            return
+        kwargs: dict = {}
+        if choice == "m":
+            kwargs["model_name"] = input("Model name (e.g., openai/gpt-5-mini): ").strip()
+        elif choice == "r":
+            kwargs["reasoning"] = input("Reasoning (int or minimal|low|medium|high): ").strip()
+        elif choice == "s":
+            kwargs["system_prompt_text"] = input("System prompt text: ").strip()
+        elif choice == "i":
+            kwargs["sandbox_imports"] = input("Comma-separated imports: ").strip()
+        elif choice == "f":
+            kwargs["sandbox_fs"] = input("Enable filesystem? [y/N]: ").strip().lower() in {"y", "yes"}
+        elif choice == "n":
+            kwargs["sandbox_net"] = input("Enable network? [y/N]: ").strip().lower() in {"y", "yes"}
+        elif choice == "p":
+            kwargs["sandbox_subprocess"] = input("Enable subprocess? [y/N]: ").strip().lower() in {"y", "yes"}
+        elif choice == "d":
+            kwargs["deps_policy"] = input("Policy (off|if-present|allow): ").strip()
+        elif choice == "g":
+            val = input("Generation retries (int): ").strip()
+            kwargs["retries_generation"] = int(val) if val.isdigit() else None
+        elif choice == "e":
+            val = input("Repair retries (int): ").strip()
+            kwargs["retries_repair"] = int(val) if val.isdigit() else None
+
+        _update_config(
+            start_path=base,
+            model_name=kwargs.get("model_name"),
+            system_prompt_text=kwargs.get("system_prompt_text"),
+            system_prompt_file=None,
+            reasoning=kwargs.get("reasoning"),
+            sandbox_imports=kwargs.get("sandbox_imports"),
+            sandbox_fs=kwargs.get("sandbox_fs"),
+            sandbox_net=kwargs.get("sandbox_net"),
+            sandbox_subprocess=kwargs.get("sandbox_subprocess"),
+            deps_policy=kwargs.get("deps_policy"),
+            retries_generation=kwargs.get("retries_generation"),
+            retries_repair=kwargs.get("retries_repair"),
+        )
+        print("Configuration updated.")
+        _pause()
+
+
+def run_edit_menu(start_path: Path | None = None) -> None:
+    base = _ensure_workspace_or_offer_init(start_path)
+    while True:
+        _clear_screen()
+        _title("Splice Editor")
+        print(textwrap.dedent(
+            """
+            A guided menu to manage your Splice workspace. Choose an area to work on.
+            Everything you set here updates files under .splice/ so it's safe to use.
+            """
+        ).strip())
+        choice = _choose(
+            "Where do you want to go?",
+            [
+                ("f", "Functions: add/edit function specs"),
+                ("d", "Documentation: generate/edit context docs"),
+                ("c", "Configuration: model, sandbox, retries, deps"),
+                ("q", "Quit"),
+            ],
+        )
+        if choice == "q":
+            return
+        if choice == "f":
+            _menu_functions(base)
+        elif choice == "d":
+            _menu_docs(base)
+        elif choice == "c":
+            _menu_config(base)
+
+
+def _load_yaml_config(path: Path) -> dict:
+    try:
+        return yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        return {}
+
+
+def _save_yaml_config(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+
+
+def _ensure_model_dict(cfg: dict) -> dict:
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {}
+    cfg["model"] = model
+    return model
+
+
+def _ensure_sandbox_dict(cfg: dict) -> dict:
+    sandbox = cfg.get("sandbox")
+    if not isinstance(sandbox, dict):
+        sandbox = {}
+    cfg["sandbox"] = sandbox
+    return sandbox
+
+
+def _ensure_deps_dict(cfg: dict) -> dict:
+    deps = cfg.get("dependencies")
+    if not isinstance(deps, dict):
+        deps = {}
+    cfg["dependencies"] = deps
+    return deps
+
+
+def _ensure_retries_dict(cfg: dict) -> dict:
+    retries = cfg.get("retries")
+    if not isinstance(retries, dict):
+        retries = {}
+    cfg["retries"] = retries
+    return retries
+
+
+def _update_config(
+    *,
+    start_path: Optional[Path],
+    model_name: Optional[str],
+    system_prompt_text: Optional[str],
+    system_prompt_file: Optional[str],
+    reasoning: Optional[str],
+    sandbox_imports: Optional[str],
+    sandbox_fs: Optional[bool],
+    sandbox_net: Optional[bool],
+    sandbox_subprocess: Optional[bool],
+    deps_policy: Optional[str],
+    retries_generation: Optional[int],
+    retries_repair: Optional[int],
+) -> Optional[Path]:
+    base = find_splice_directory(start_path)
+    cfg_path = base / "splice.yaml"
+    cfg_data = _load_yaml_config(cfg_path)
+
+    # Model fields
+    if model_name is not None or system_prompt_text is not None or system_prompt_file is not None or reasoning is not None:
+        m = _ensure_model_dict(cfg_data)
+        if model_name is not None:
+            m["name"] = str(model_name)
+        if system_prompt_file is not None:
+            try:
+                m["system_prompt"] = Path(system_prompt_file).read_text()
+            except Exception as exc:  # noqa: BLE001
+                raise SystemExit(f"Failed to read system prompt file: {exc}")
+        if system_prompt_text is not None:
+            m["system_prompt"] = str(system_prompt_text)
+        if reasoning is not None:
+            # Accept int or enum-like strings; map strings to integers, error on invalid
+            mapping = {
+                "minimal": 0,
+                "low": 1,
+                "medium": 2,
+                "high": 3,
+            }
+            text = str(reasoning).strip()
+            try:
+                m["reasoning"] = int(text)
+            except Exception:
+                lowered = text.lower()
+                if lowered in mapping:
+                    m["reasoning"] = mapping[lowered]
+                else:
+                    raise SystemExit(
+                        "Invalid reasoning value. Use an integer or one of: minimal | low | medium | high"
+                    )
+
+    # Sandbox
+    if any(x is not None for x in [sandbox_imports, sandbox_fs, sandbox_net, sandbox_subprocess]):
+        s = _ensure_sandbox_dict(cfg_data)
+        if sandbox_imports is not None:
+            items = [x.strip() for x in sandbox_imports.split(",") if x.strip()]
+            s["allow_imports"] = items
+        if sandbox_fs is not None:
+            s["allow_fs"] = bool(sandbox_fs)
+        if sandbox_net is not None:
+            s["allow_net"] = bool(sandbox_net)
+        if sandbox_subprocess is not None:
+            s["allow_subprocess"] = bool(sandbox_subprocess)
+
+    # Dependencies
+    if deps_policy is not None:
+        d = _ensure_deps_dict(cfg_data)
+        d["policy"] = str(deps_policy)
+
+    # Retries
+    if retries_generation is not None or retries_repair is not None:
+        r = _ensure_retries_dict(cfg_data)
+        if retries_generation is not None:
+            r["generation"] = int(retries_generation)
+        if retries_repair is not None:
+            r["repair"] = int(retries_repair)
+
+    # Write if any change requested
+    _save_yaml_config(cfg_path, cfg_data)
+    return cfg_path
+
+
+def _write_context_doc(base: Path, name: str, content: str) -> Path:
+    ctx_dir = base / "context"
+    ctx_dir.mkdir(parents=True, exist_ok=True)
+    out_path = ctx_dir / f"{name}.md"
+    out_path.write_text(content)
+    return out_path
+
+
+def _fetch_url_text(url: str, *, timeout: float = 20.0) -> str:
+    try:
+        r = httpx.get(url, timeout=timeout, follow_redirects=True)
+        r.raise_for_status()
+        text = r.text
+    except Exception as exc:  # noqa: BLE001
+        return f"[Failed to fetch URL: {exc}]"
+    # Very simple HTML-to-text fallback if it looks like HTML
+    if "<html" in text.lower():
+        # Strip script/style and tags
+        import re as _re
+
+        text = _re.sub(r"<script[\s\S]*?</script>", " ", text, flags=_re.IGNORECASE)
+        text = _re.sub(r"<style[\s\S]*?</style>", " ", text, flags=_re.IGNORECASE)
+        text = _re.sub(r"<[^>]+>", " ", text)
+        text = _re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _generate_docs_from_url(name: str, url: str, *, start_path: Optional[Path]) -> Path:
+    base = find_splice_directory(start_path)
+    cfg = SpliceConfig.load(start_path=base)
+    client = OpenRouterClient()
+
+    scraped = _fetch_url_text(url)
+    sys_msg = {
+        "role": "system",
+        "content": (
+            "You are a precise technical writer. Using the provided documentation excerpt, "
+            "produce a clear, helpful Markdown document for the target type or API."
+        ),
+    }
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"Target name: {name}\n"
+            f"Source documentation URL: {url}\n\n"
+            f"Relevant content (trimmed):\n{scraped[:20000]}\n\n"  # cap to avoid overlong prompts
+            "Output a standalone Markdown doc starting with '# <Name>'."
+        ),
+    }
+    try:
+        doc_text = client.complete_text([sys_msg, user_msg], cfg)
+    except GenerationError as exc:
+        doc_text = f"# {name}\nDocumentation unavailable (generation failed).\n\nError: {exc}\n"
+
+    out_path = _write_context_doc(base, name, doc_text)
+    print(f"Wrote doc: {out_path}")
+    return out_path
+
+
+def cmd_edit(
+    *,
+    start_path: Optional[Path] = None,
+    # function spec creation
+    add_func: Optional[List[str]] = None,
+    func_mode: str = "minimal",
+    # class doc generation
+    doc_classes: Optional[List[str]] = None,
+    # URL-based doc generation
+    doc_url: Optional[str] = None,
+    doc_url_name: Optional[str] = None,
+    # config updates
+    set_model: Optional[str] = None,
+    set_system_prompt_text: Optional[str] = None,
+    set_system_prompt_file: Optional[str] = None,
+    set_reasoning: Optional[str] = None,
+    set_sandbox_imports: Optional[str] = None,
+    enable_fs: Optional[bool] = None,
+    enable_net: Optional[bool] = None,
+    enable_subprocess: Optional[bool] = None,
+    set_deps_policy: Optional[str] = None,
+    set_retries_generation: Optional[int] = None,
+    set_retries_repair: Optional[int] = None,
+) -> int:
+    base = find_splice_directory(start_path)
+    did_anything = False
+
+    # 1) Config updates
+    if any(
+        x is not None
+        for x in [
+            set_model,
+            set_system_prompt_text,
+            set_system_prompt_file,
+            set_reasoning,
+            set_sandbox_imports,
+            enable_fs,
+            enable_net,
+            enable_subprocess,
+            set_deps_policy,
+            set_retries_generation,
+            set_retries_repair,
+        ]
+    ):
+        path = _update_config(
+            start_path=base,
+            model_name=set_model,
+            system_prompt_text=set_system_prompt_text,
+            system_prompt_file=set_system_prompt_file,
+            reasoning=set_reasoning,
+            sandbox_imports=set_sandbox_imports,
+            sandbox_fs=enable_fs,
+            sandbox_net=enable_net,
+            sandbox_subprocess=enable_subprocess,
+            deps_policy=set_deps_policy,
+            retries_generation=set_retries_generation,
+            retries_repair=set_retries_repair,
+        )
+        if path is not None:
+            print(f"Updated config at {path}")
+        did_anything = True
+
+    # 2) Add functions
+    if add_func:
+        for name in add_func:
+            _ = _write_function_spec(name, base, minimal=(func_mode == "minimal"))
+            print(f"Created function spec at {(base / 'functions' / (name + '.yaml'))}")
+        did_anything = True
+
+    # 3) Generate docs for classes
+    if doc_classes:
+        sources = [DocSource(name=t.split(".")[-1], import_path=t, doc_strategy="class") for t in doc_classes]
+        generate_docs(sources, start_path=base)
+        print(f"Generated/ensured {len(sources)} context doc(s).")
+        did_anything = True
+
+    # 4) Generate docs from URL
+    if doc_url is not None:
+        if not doc_url_name:
+            raise SystemExit("--doc-url-name is required when using --doc-url")
+        _generate_docs_from_url(doc_url_name, doc_url, start_path=base)
+        did_anything = True
+    if not did_anything:
+        # Launch interactive menu
+        try:
+            run_edit_menu(start_path=base)
+        except KeyboardInterrupt:
+            print("\nExited.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="splice", description="Splice CLI: init workspaces, generate docs, manage cache, and scaffold function specs.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -474,6 +1097,58 @@ def build_parser() -> argparse.ArgumentParser:
     group = p_make.add_mutually_exclusive_group()
     group.add_argument("--auto", action="store_true", help="Attempt an opinionated template")
     group.add_argument("--minimal", action="store_true", help="Write a minimal skeleton (default)")
+
+    # New unified editor
+    p_edit = sub.add_parser("edit", help="Edit workspace: config, functions, and docs")
+    # Function specs
+    p_edit.add_argument("--add-func", nargs="*", help="Add one or more function specs by name")
+    p_edit.add_argument(
+        "--func-mode",
+        choices=["minimal", "auto"],
+        default="minimal",
+        help="Template style when adding function specs",
+    )
+    # Docs: classes
+    p_edit.add_argument(
+        "--doc-class",
+        nargs="*",
+        help="One or more import paths (e.g., package.module.ClassName) to document",
+    )
+    # Docs: external URL
+    p_edit.add_argument("--doc-url", help="Documentation URL to scrape and summarize for a type")
+    p_edit.add_argument("--doc-url-name", help="Target name for the generated doc from URL")
+    # Config updates
+    p_edit.add_argument("--set-model", help="Set model name, e.g., openai/gpt-5-mini")
+    p_edit.add_argument(
+        "--set-system-prompt-text",
+        help="Set system prompt from inline text",
+    )
+    p_edit.add_argument(
+        "--set-system-prompt-file",
+        help="Set system prompt from a file path",
+    )
+    p_edit.add_argument(
+        "--set-reasoning",
+        help="Set reasoning effort (int or one of minimal|low|medium|high)",
+    )
+    p_edit.add_argument(
+        "--set-sandbox-imports",
+        help="Override sandbox allow_imports (comma-separated)",
+    )
+    p_edit.add_argument("--enable-fs", dest="enable_fs", action="store_true", help="Enable filesystem access in sandbox")
+    p_edit.add_argument("--disable-fs", dest="enable_fs", action="store_false", help="Disable filesystem access in sandbox")
+    p_edit.add_argument("--enable-net", dest="enable_net", action="store_true", help="Enable network access in sandbox")
+    p_edit.add_argument("--disable-net", dest="enable_net", action="store_false", help="Disable network access in sandbox")
+    p_edit.add_argument("--enable-subprocess", dest="enable_subprocess", action="store_true", help="Enable subprocess in sandbox")
+    p_edit.add_argument("--disable-subprocess", dest="enable_subprocess", action="store_false", help="Disable subprocess in sandbox")
+    p_edit.set_defaults(enable_fs=None, enable_net=None, enable_subprocess=None)
+    p_edit.add_argument(
+        "--set-deps-policy",
+        choices=["off", "if-present", "allow"],
+        help="Set dependency policy",
+    )
+    p_edit.add_argument("--set-retries-generation", type=int, help="Set generation retry attempts")
+    p_edit.add_argument("--set-retries-repair", type=int, help="Set repair retry attempts")
     
     p.add_argument("--version", action="store_true", help="Print version and exit")
     return p
@@ -504,6 +1179,25 @@ def main(argv: List[str] | None = None) -> int:
             mode = "auto"
         cmd_make_func(args.name, mode=mode)
         return 0
+    if args.cmd == "edit":
+        return cmd_edit(
+            add_func=getattr(args, "add_func", None),
+            func_mode=getattr(args, "func_mode", "minimal"),
+            doc_classes=getattr(args, "doc_class", None),
+            doc_url=getattr(args, "doc_url", None),
+            doc_url_name=getattr(args, "doc_url_name", None),
+            set_model=getattr(args, "set_model", None),
+            set_system_prompt_text=getattr(args, "set_system_prompt_text", None),
+            set_system_prompt_file=getattr(args, "set_system_prompt_file", None),
+            set_reasoning=getattr(args, "set_reasoning", None),
+            set_sandbox_imports=getattr(args, "set_sandbox_imports", None),
+            enable_fs=getattr(args, "enable_fs", None),
+            enable_net=getattr(args, "enable_net", None),
+            enable_subprocess=getattr(args, "enable_subprocess", None),
+            set_deps_policy=getattr(args, "set_deps_policy", None),
+            set_retries_generation=getattr(args, "set_retries_generation", None),
+            set_retries_repair=getattr(args, "set_retries_repair", None),
+        )
     return 1
 
 

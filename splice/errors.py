@@ -30,3 +30,10 @@ class DependenciesError(SpliceError):
     """Raised when dependency policy cannot satisfy required modules."""
 
 
+class WorkspaceNotFoundError(SpliceError):
+    """Raised when no `.splice/` workspace can be located.
+
+    Guidance: run `splice init` in your project root to create one.
+    """
+
+

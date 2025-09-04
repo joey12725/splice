@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .config import SpliceConfig
-from .paths import find_splice_directory
+from .paths import require_splice_directory
 from .specs import FunctionSpec
 
 
@@ -26,7 +26,7 @@ def _load_context_docs(doc_names: Iterable[str], start_path: Path | None) -> lis
     Returns a list of (name, content) pairs for files that exist; missing files are ignored.
     """
 
-    base = find_splice_directory(start_path)
+    base = require_splice_directory(start_path)
     ctx_dir = base / "context"
     loaded: list[tuple[str, str]] = []
     for name in doc_names:

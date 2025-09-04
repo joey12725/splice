@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from .paths import find_splice_directory
+from .paths import find_splice_directory, require_splice_directory
 
 
 def _ensure_parent_dir(path: Path) -> None:
@@ -68,7 +68,7 @@ class ArtifactStore:
 
     def __init__(self, database_path: Path | None = None, start_path: Path | None = None) -> None:
         if database_path is None:
-            base = find_splice_directory(start_path)
+            base = require_splice_directory(start_path)
             database_path = base / "db.sqlite"
         _ensure_parent_dir(database_path)
         self._db_path = database_path

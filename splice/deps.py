@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 from .errors import DependenciesError
-from .paths import find_splice_directory
+from .paths import require_splice_directory
 
 
 @dataclass
@@ -63,7 +63,7 @@ def _compute_site_packages_dir(venv_dir: Path) -> Path:
 
 
 def create_session_env(*, start_path: Optional[Path], session_id: str) -> SessionEnv:
-    base = find_splice_directory(start_path)
+    base = require_splice_directory(start_path)
     venv_root = base / "cache" / "venv"
     venv_dir = venv_root / session_id
     pip_cache_dir = (base / "cache" / "pip").resolve()

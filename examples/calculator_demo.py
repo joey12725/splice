@@ -18,9 +18,12 @@ def _parse(s: str) -> tuple[float, str, float]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Expect the spec to already be present under .splice/functions/generic_operand.yaml
-    from splice.cli import cmd_init
-    cmd_init()
+    # Require a project-local .splice/; instruct user to init if missing
+    from splice.paths import require_splice_directory
+    try:
+        require_splice_directory(None)
+    except Exception as exc:
+        raise SystemExit(f"{exc}")
 
     s = Session.ensure(); sp = Splice(); q = None
 

@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 
 from .errors import SpecError, SpecNotFoundError
-from .paths import find_splice_directory
+from .paths import require_splice_directory
 
 
 @dataclass
@@ -63,7 +63,7 @@ def _validate_examples(examples: list[dict[str, str]], signature: str) -> None:
 def load_function_spec(name: str, start_path: Path | None = None) -> FunctionSpec:
     """Load a function spec YAML by name from `.splice/functions/<name>.yaml`."""
 
-    base = find_splice_directory(start_path)
+    base = require_splice_directory(start_path)
     spec_path = base / "functions" / f"{name}.yaml"
     if not spec_path.exists():
         raise SpecNotFoundError(f"Spec not found: {spec_path}")

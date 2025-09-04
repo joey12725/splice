@@ -7,7 +7,7 @@ from typing import Any
 import yaml
 
 from .errors import ConfigError
-from .paths import find_splice_directory
+from .paths import require_splice_directory
 
 DEFAULT_ALLOW_IMPORTS: list[str] = ["math", "statistics", "numpy"]
 
@@ -72,7 +72,7 @@ class SpliceConfig:
         if config_path is not None:
             path = Path(config_path)
         else:
-            base = find_splice_directory(start_path)
+            base = require_splice_directory(start_path)
             path = base / "splice.yaml"
 
         if not path.exists():
@@ -86,10 +86,35 @@ class SpliceConfig:
 
         # Construct nested configs with defaults and overrides
         def model_from(d: dict[str, Any]) -> ModelConfig:
+            # Map reasoning: accept int or enum string minimal|low|medium|high
+            raw_reasoning = d.get("reasoning", ModelConfig.reasoning)
+            reasoning_value: int
+            if isinstance(raw_reasoning, str):
+                level = raw_reasoning.strip().lower()
+                mapping = {
+                    "minimal": 0,
+                    "low": 1,
+                    "medium": 2,
+                    "high": 3,
+                }
+                if level in mapping:
+                    reasoning_value = mapping[level]
+                else:
+                    raise ConfigError(
+                        "model.reasoning must be an integer or one of: minimal | low | medium | high"
+                    )
+            else:
+                try:
+                    reasoning_value = int(raw_reasoning)
+                except Exception as exc:  # noqa: BLE001
+                    raise ConfigError(
+                        "model.reasoning must be an integer or one of: minimal | low | medium | high"
+                    ) from exc
+
             return ModelConfig(
                 name=str(d.get("name", ModelConfig.name)),
                 temperature=float(d.get("temperature", ModelConfig.temperature)),
-                reasoning=int(d.get("reasoning", ModelConfig.reasoning)),
+                reasoning=reasoning_value,
                 system_prompt=str(d.get("system_prompt", ModelConfig.system_prompt)),
             )
 
