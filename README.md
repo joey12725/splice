@@ -52,6 +52,22 @@ result = Splice().run(
 print(result)
 ```
 
+Generate-only (no execution) when you don't have test data yet:
+```python
+from splice import Splice, Session
+
+session = Session.ensure()
+# Generates and caches code, but does not execute and returns None
+Splice().run(
+    "my_op",
+    session=session,
+    prompt="Return (a + b) / 2",
+    run_now=False,
+)
+# Later, call without run_now to actually execute; auto-repair still applies
+print(Splice().run("my_op", session=session, a=4.0, b=6.0))
+```
+
 ## Function specs (YAML)
 Place specs at `.splice/functions/<name>.yaml`.
 

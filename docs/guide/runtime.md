@@ -21,6 +21,18 @@ result = Splice().run(
 )
 ```
 
+Generate-only mode (no execution) using `run_now=False`:
+```python
+from splice import Splice
+
+# Generates and caches code using the provided prompt, returns None
+Splice().run("generic_operand", session=sess, prompt="Return max(a, b)", run_now=False)
+
+# Later, execute normally; if the generated code fails on this first actual run,
+# Splice will still attempt a repair using the error and retry once (per config).
+val = Splice().run("generic_operand", session=sess, a=3.0, b=5.0)
+```
+
 ### Caching
 Generated code is cached per `(session_id, function_name, prompt_hash, spec_hash, context_hash, config_hash)` in `.splice/db.sqlite`.
 

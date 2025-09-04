@@ -40,6 +40,17 @@ res = Splice().run(
 print(res)
 ```
 
+If you only want to generate code now and run later (no test data yet):
+```python
+from splice import Splice, Session
+
+sess = Session.ensure()
+# Caches generated code but does not execute and returns None
+Splice().run("my_op", session=sess, prompt="Return (a + b) / 2", run_now=False)
+# Later, execute with inputs; first run will still auto-repair on errors
+print(Splice().run("my_op", session=sess, a=2.0, b=4.0))
+```
+
 Next steps:
 - Explore the [Function Specs](./specs.md)
 - Configure the [Sandbox and Cache](./runtime.md)

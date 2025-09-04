@@ -60,6 +60,7 @@ class Splice:
         session: "Session",
         prompt: str | None = None,
         start_path: "Path | None" = None,
+        run_now: bool = True,
         **kwargs: Any,
     ) -> Any:
         """Generate or reuse code for `name` and execute with kwargs.
@@ -109,7 +110,18 @@ class Splice:
         context_pairs = _load_context_docs(spec.context_docs, base)
         merged_docs = "\n\n".join([content for _, content in context_pairs])
 
-        # Prompt is session-scoped. If missing and no cached artifact, error.
+        # If caller explicitly does not want to run and provided no prompt,
+        # there is nothing to do (no generation or execution). Emit a warning and return.
+        if not run_now and prompt is None:
+            import warnings as _warnings
+
+            _warnings.warn(
+                "Splice.run(run_now=False) called without a prompt: nothing to generate or run.",
+                stacklevel=2,
+            )
+            return None
+
+        # Prompt is session-scoped. If missing and no cached artifact, error (unless run_now=False handled above).
         active_prompt = prompt if prompt is not None else spec.prompt
         from .store import ArtifactStore as _AS
         prompt_hash = _AS.hash_prompt(active_prompt)
@@ -149,6 +161,10 @@ class Splice:
                 art_code = code_text
         else:
             art_code = art.code
+
+        # If generation-only was requested (run_now=False with a prompt), return without executing.
+        if not run_now:
+            return None
 
         # Phase 6: validate inputs pre-execution
         from .validation import build_validators

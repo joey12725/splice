@@ -210,6 +210,119 @@ def _list_available_context_docs(base: Path) -> list[tuple[str, str]]:
     return docs
 
 
+def _list_available_context_doc_names(base: Path) -> list[str]:
+    """Return context doc base names without the .md extension."""
+    names: list[str] = []
+    try:
+        for p in sorted((base / "context").glob("*.md")):
+            n = p.name
+            names.append(n[:-3] if n.endswith(".md") else n)
+    except Exception:
+        pass
+    return names
+
+
+def _manage_context_docs_for_spec(base: Path, spec_path: Path) -> None:
+    """Interactive manager to link/unlink context docs for a function spec.
+
+    Allows quickly linking all available docs, adding/removing individual docs,
+    or clearing the list.
+    """
+    try:
+        data = yaml.safe_load(spec_path.read_text()) or {}
+    except Exception as exc:
+        print(f"Failed to parse YAML: {exc}")
+        return
+
+    def _get_current() -> list[str]:
+        raw = data.get("context_docs")
+        if not isinstance(raw, list):
+            return []
+        # Normalize to names without .md extension
+        cleaned: list[str] = []
+        for x in raw:
+            if isinstance(x, str):
+                cleaned.append(x[:-3] if x.endswith(".md") else x)
+        return cleaned
+
+    def _save() -> None:
+        try:
+            spec_path.write_text(yaml.safe_dump(data, sort_keys=False))
+        except Exception as exc:
+            print(f"Failed to write spec: {exc}")
+
+    while True:
+        _clear_screen()
+        _title(f"Manage context docs for {spec_path.name}")
+        current = _get_current()
+        available = _list_available_context_doc_names(base)
+        print("Current linked docs (context_docs):")
+        if current:
+            for idx, n in enumerate(current, 1):
+                print(f"  [{idx}] {n}")
+        else:
+            print("  (none)")
+        print("\nAvailable docs in .splice/context/:")
+        if available:
+            print("  " + ", ".join(available))
+        else:
+            print("  (none found)")
+
+        choice = _choose(
+            "Choose an action:",
+            [
+                ("l", "Link ALL available docs to this function"),
+                ("a", "Add a doc by name"),
+                ("r", "Remove a linked doc"),
+                ("c", "Clear all linked docs"),
+                ("b", "Back"),
+            ],
+        )
+        if choice == "b":
+            return
+        if choice == "l":
+            data["context_docs"] = sorted(set(available))
+            _save()
+            print("Linked all available docs.")
+            _pause()
+            continue
+        if choice == "a":
+            name = input("Enter doc name (without .md): ").strip()
+            if not name:
+                continue
+            if available and name not in available:
+                print("Warning: that name was not found under .splice/context. It will still be added.")
+            updated = sorted(set(current + [name]))
+            data["context_docs"] = updated
+            _save()
+            print(f"Added '{name}'.")
+            _pause()
+            continue
+        if choice == "r":
+            if not current:
+                _pause()
+                continue
+            sel = input("Enter number to remove (or blank to cancel): ").strip()
+            if not sel.isdigit():
+                continue
+            idx = int(sel)
+            if idx < 1 or idx > len(current):
+                continue
+            name = current[idx - 1]
+            remaining = [n for n in current if n != name]
+            data["context_docs"] = remaining
+            _save()
+            print(f"Removed '{name}'.")
+            _pause()
+            continue
+        if choice == "c":
+            data["context_docs"] = []
+            _save()
+            print("Cleared all linked docs.")
+            _pause()
+            continue
+
+
 def _generate_questions_for_symbol(client: OpenRouterClient, cfg: SpliceConfig, *, module: str, name: str, kind: str, code: str) -> list[str]:
     sys_msg = {
         "role": "system",
@@ -589,9 +702,13 @@ def _menu_functions(base: Path) -> None:
             target = specs[int(sel) - 1]
 
             # Choose how to edit
-            how = _choose("Edit method:", [("g", "Guided fields"), ("v", "Open in $EDITOR")])
+            how = _choose("Edit method:", [("g", "Guided fields"), ("d", "Manage linked context docs"), ("v", "Open in $EDITOR")])
             if how == "v":
                 _edit_file_in_editor(target)
+                continue
+            if how == "d":
+                _manage_context_docs_for_spec(base, target)
+                _pause()
                 continue
 
             # Guided editing
@@ -692,6 +809,45 @@ def _menu_docs(base: Path) -> None:
             _edit_file_in_editor(target)
 
 
+def _menu_agents(base: Path) -> None:
+    while True:
+        _clear_screen()
+        _title("Agents")
+        project_root = base.parent
+        default_path = project_root / "agents.md"
+        print(textwrap.dedent(
+            f"""
+            Append a standard 'Using Splice' section to an agents.md file.
+
+            Default location: {default_path}
+            """
+        ).strip())
+        choice = _choose(
+            "Choose an option:",
+            [
+                ("a", f"Append to default: {default_path}"),
+                ("c", "Append to a custom path"),
+                ("b", "Back to main menu"),
+            ],
+        )
+        if choice == "b":
+            return
+        if choice == "a":
+            out = _append_agents_md_instructions(start_path=base, target_path=None)
+            print(f"Appended Splice instructions to {out}")
+            _pause()
+            continue
+        if choice == "c":
+            path = input("Enter custom path to agents.md: ").strip()
+            if not path:
+                _pause()
+                continue
+            out = _append_agents_md_instructions(start_path=base, target_path=path)
+            print(f"Appended Splice instructions to {out}")
+            _pause()
+            continue
+
+
 def _menu_config(base: Path) -> None:
     while True:
         _clear_screen()
@@ -789,6 +945,7 @@ def run_edit_menu(start_path: Path | None = None) -> None:
             [
                 ("f", "Functions: add/edit function specs"),
                 ("d", "Documentation: generate/edit context docs"),
+                ("a", "Agents: append 'Using Splice' to agents.md"),
                 ("c", "Configuration: model, sandbox, retries, deps"),
                 ("q", "Quit"),
             ],
@@ -799,6 +956,8 @@ def run_edit_menu(start_path: Path | None = None) -> None:
             _menu_functions(base)
         elif choice == "d":
             _menu_docs(base)
+        elif choice == "a":
+            _menu_agents(base)
         elif choice == "c":
             _menu_config(base)
 
@@ -988,6 +1147,121 @@ def _generate_docs_from_url(name: str, url: str, *, start_path: Optional[Path]) 
     return out_path
 
 
+def _append_agents_md_instructions(
+    *, start_path: Optional[Path], target_path: Optional[str]
+) -> Path:
+    """Append a short "Using Splice" section to agents.md.
+
+    If target_path is not provided, defaults to '<project_root>/agents.md'.
+    """
+    base = find_splice_directory(start_path)
+    project_root = base.parent
+    out_path = Path(target_path).expanduser() if target_path else (project_root / "agents.md")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    section = textwrap.dedent(
+        """
+        ## Agents: Using Splice in this project
+
+        This project uses Splice to generate and safely run small, spec-driven functions with an LLM.
+        Splice manages prompts, caching, sandboxing, and optional dependencies so you can call
+        `Splice().run("<function>", ...)` as if it were a normal function.
+
+        ### Prerequisites
+        - Set an API key for OpenRouter (used by Splice under the hood):
+          ```bash
+          export OPENROUTER_API_KEY="sk-or-..."
+          ```
+        - Initialize a local Splice workspace (creates `.splice/`):
+          ```bash
+          splice init
+          ```
+
+        ### Programmatic usage (preferred)
+        Call a function by name. Provide a prompt the first time to establish the behavior,
+        then omit it on subsequent calls within the same session to reuse the cached code.
+        ```python
+        from splice import Splice, Session
+
+        session = Session.ensure()
+        result = Splice().run(
+            "generic_operand",   # function name from .splice/functions/generic_operand.yaml
+            session=session,
+            prompt="Return max(a, b)",  # only needed on first call to define behavior
+            a=3.0,
+            b=5.0,
+        )
+        print(result)  # 5.0
+        ```
+
+        If you don't have test data yet, you can generate now and run later using `run_now=False`.
+        This caches the generated code and returns None without executing. Later, call without the flag
+        to execute; if it fails, Splice still attempts one repair based on the error (per config).
+        ```python
+        from splice import Splice, Session
+
+        s = Session.ensure()
+        Splice().run("generic_operand", session=s, prompt="Return max(a, b)", run_now=False)
+        # ... later, when inputs are available:
+        print(Splice().run("generic_operand", session=s, a=3.0, b=5.0))
+        ```
+
+        Minimal flow:
+        1) You define a function spec in `.splice/functions/<name>.yaml` with a signature/contract.
+        2) Splice asks the LLM to generate exactly one Python function that satisfies the contract.
+        3) The code is executed in a sandbox and cached per session and inputs.
+        4) Subsequent calls reuse the cached code unless the spec/prompt/config changes.
+
+        ### Where things live
+        - Function specs: `.splice/functions/*.yaml` (name, contracts.signature, inputs, output, examples)
+        - Context docs (optional): `.splice/context/*.md` – referenced by specs via `context_docs`
+        - Cache and logs: `.splice/db.sqlite`
+        - Config: `.splice/splice.yaml` (model, sandbox gates, retries, deps policy)
+
+        ### Sandbox and dependencies
+        - Execution runs with restricted builtins and an import allowlist.
+        - Filesystem/network/subprocess access are off by default and can be enabled in config.
+        - Dependencies can be managed with a policy (off | if-present | allow); Splice will respect per-session environments when enabled.
+
+        ### Helpful CLI
+        - Add a function spec:
+          ```bash
+          splice edit --add-func my_function --func-mode minimal
+          ```
+        - Generate docs for Python classes to reference in specs:
+          ```bash
+          splice edit --doc-class package.module.ClassName
+          ```
+        - Generate docs from a URL:
+          ```bash
+          splice edit --doc-url https://example.com/docs --doc-url-name mylib
+          ```
+        - Interactive editor (functions, docs, config, agents.md helper):
+          ```bash
+          splice edit
+          ```
+
+        See `.splice/` for all managed files. Start by creating a spec in `.splice/functions/`,
+        then call it via `Splice().run(...)` from your code.
+        """
+    ).strip() + "\n"
+
+    try:
+        if out_path.exists():
+            current = out_path.read_text()
+            with out_path.open("a") as f:
+                if not current.endswith("\n"):
+                    f.write("\n")
+                f.write("\n")
+                f.write(section)
+        else:
+            out_path.write_text(section)
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"Failed to write agents.md instructions: {exc}")
+
+    return out_path
+
+
 def cmd_edit(
     *,
     start_path: Optional[Path] = None,
@@ -999,6 +1273,9 @@ def cmd_edit(
     # URL-based doc generation
     doc_url: Optional[str] = None,
     doc_url_name: Optional[str] = None,
+    # agents.md helper
+    append_agents_md: bool = False,
+    agents_md_path: Optional[str] = None,
     # config updates
     set_model: Optional[str] = None,
     set_system_prompt_text: Optional[str] = None,
@@ -1070,6 +1347,11 @@ def cmd_edit(
             raise SystemExit("--doc-url-name is required when using --doc-url")
         _generate_docs_from_url(doc_url_name, doc_url, start_path=base)
         did_anything = True
+    # 5) Append agents.md instructions
+    if append_agents_md:
+        out_path = _append_agents_md_instructions(start_path=base, target_path=agents_md_path)
+        print(f"Appended Splice instructions to {out_path}")
+        did_anything = True
     if not did_anything:
         # Launch interactive menu
         try:
@@ -1117,6 +1399,16 @@ def build_parser() -> argparse.ArgumentParser:
     # Docs: external URL
     p_edit.add_argument("--doc-url", help="Documentation URL to scrape and summarize for a type")
     p_edit.add_argument("--doc-url-name", help="Target name for the generated doc from URL")
+    # Agents.md helper
+    p_edit.add_argument(
+        "--append-agents-md",
+        action="store_true",
+        help="Append a 'Using Splice' section to agents.md (or a custom path)",
+    )
+    p_edit.add_argument(
+        "--agents-md-path",
+        help="Custom path to agents.md; defaults to ./agents.md at project root",
+    )
     # Config updates
     p_edit.add_argument("--set-model", help="Set model name, e.g., openai/gpt-5-mini")
     p_edit.add_argument(
@@ -1186,6 +1478,8 @@ def main(argv: List[str] | None = None) -> int:
             doc_classes=getattr(args, "doc_class", None),
             doc_url=getattr(args, "doc_url", None),
             doc_url_name=getattr(args, "doc_url_name", None),
+            append_agents_md=getattr(args, "append_agents_md", False),
+            agents_md_path=getattr(args, "agents_md_path", None),
             set_model=getattr(args, "set_model", None),
             set_system_prompt_text=getattr(args, "set_system_prompt_text", None),
             set_system_prompt_file=getattr(args, "set_system_prompt_file", None),
