@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import ast
+import re
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Iterable, Tuple
+
+import yaml
 
 from .docgen import DocSource, generate_docs
 from .paths import find_splice_directory
+from .config import SpliceConfig
+from .client import OpenRouterClient, GenerationError
 
 
-def cmd_init(start_path: Path | None = None) -> Path:
+def cmd_init(start_path: Path | None = None, *, wizard: bool = False) -> Path:
     base = find_splice_directory(start_path)
     base.mkdir(parents=True, exist_ok=True)
     (base / "functions").mkdir(parents=True, exist_ok=True)
@@ -43,6 +50,20 @@ def cmd_init(start_path: Path | None = None) -> Path:
             + "\n"
         )
     print(f"Initialized Splice workspace at {base}")
+    if wizard:
+        try:
+            run_init_wizard(start_path=base)
+        except KeyboardInterrupt:
+            print("\nWizard cancelled.")
+    else:
+        # Offer to run wizard if interactive TTY
+        try:
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                resp = input("Run interactive setup wizard now? [Y/n]: ").strip().lower()
+                if resp in {"", "y", "yes"}:
+                    run_init_wizard(start_path=base)
+        except Exception:
+            pass
     return base
 
 
@@ -116,11 +137,331 @@ def cmd_make_func(name: str, *, mode: str = "minimal", start_path: Optional[Path
     return path
 
 
+# -------- Interactive Wizard Utilities --------
+
+def _prompt(prompt_text: str, *, allow_empty: bool = False) -> str:
+    while True:
+        val = input(prompt_text).strip()
+        if val or allow_empty:
+            return val
+        print("Please enter a value.")
+
+
+def _split_csv_names(text: str) -> list[str]:
+    return [x.strip() for x in text.split(",") if x.strip()]
+
+
+def _discover_symbols(project_root: Path) -> list[tuple[str, str, str, str]]:
+    """Return list of (module_path, symbol_name, kind, source_snippet).
+
+    kind is 'class' or 'function'. Only top-level classes and functions are included.
+    """
+    results: list[tuple[str, str, str, str]] = []
+    ignore_dirs = {".git", ".splice", "__pycache__", ".venv", "venv", "node_modules", "dist", "build"}
+    for path in project_root.rglob("*.py"):
+        parts = set(p.name for p in path.parents)
+        if parts & ignore_dirs:
+            continue
+        try:
+            text = path.read_text()
+        except Exception:
+            continue
+        try:
+            tree = ast.parse(text)
+        except Exception:
+            continue
+        module_name = path.relative_to(project_root).with_suffix("").as_posix().replace("/", ".")
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                start = getattr(node, "lineno", 1)
+                end = getattr(node, "end_lineno", start)
+                snippet = "\n".join(text.splitlines()[start - 1 : end])
+                results.append((module_name, node.name, "class", snippet))
+            elif isinstance(node, ast.FunctionDef):
+                start = getattr(node, "lineno", 1)
+                end = getattr(node, "end_lineno", start)
+                snippet = "\n".join(text.splitlines()[start - 1 : end])
+                results.append((module_name, node.name, "function", snippet))
+    return results
+
+
+def _read_file_if_exists(path: Path, max_chars: int | None = 8000) -> str:
+    try:
+        text = path.read_text()
+    except Exception:
+        return ""
+    if max_chars is not None and max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars]
+    return text
+
+
+def _list_available_context_docs(base: Path) -> list[tuple[str, str]]:
+    ctx_dir = base / "context"
+    docs: list[tuple[str, str]] = []
+    try:
+        for p in sorted(ctx_dir.glob("*.md")):
+            docs.append((p.name, _read_file_if_exists(p, max_chars=2000)))
+    except Exception:
+        pass
+    return docs
+
+
+def _generate_questions_for_symbol(client: OpenRouterClient, cfg: SpliceConfig, *, module: str, name: str, kind: str, code: str) -> list[str]:
+    sys_msg = {
+        "role": "system",
+        "content": (
+            "You generate the minimal set of questions needed to write excellent docs. "
+            "Ask as few questions as possible (0 if sufficient). "
+            "Never ask questions whose answers are clear from the provided code or project context. "
+            "Output each question on its own line, with no numbering, bullets, or markdown."
+        ),
+    }
+    base = find_splice_directory(None)
+    readme = _read_file_if_exists(Path.cwd() / "README.md", max_chars=10000)
+    cfg_text = _read_file_if_exists(base / "splice.yaml", max_chars=4000)
+    ctx_docs = _list_available_context_docs(base)
+    ctx_list = "\n".join([f"- {n}" for n, _ in ctx_docs])
+    user_parts: list[str] = []
+    user_parts.append(f"Target: {kind} '{name}' from module '{module}'.")
+    user_parts.append("Source code:\n```python\n" + code + "\n```")
+    if readme:
+        user_parts.append("Project README (trimmed):\n" + readme)
+    if cfg_text:
+        user_parts.append("Splice config (trimmed):\n" + cfg_text)
+    if ctx_docs:
+        user_parts.append("Existing context docs (filenames):\n" + ctx_list)
+    user_parts.append(
+        "Produce 0–10 questions, only those strictly necessary for comprehensive docs."
+    )
+    user_msg = {"role": "user", "content": "\n\n".join(user_parts)}
+    try:
+        text = client.complete_text([sys_msg, user_msg], cfg)
+    except GenerationError as exc:
+        print(f"Failed to generate questions via LLM: {exc}")
+        return []
+    questions: list[str] = []
+    for raw in text.splitlines():
+        q = raw.strip()
+        if not q:
+            continue
+        # Strip common list markers: '-', '*', '1.', '1)', etc.
+        q = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s*", "", q)
+        if q:
+            questions.append(q)
+    # Cap at 10 as requested
+    return questions[:10]
+
+
+def _generate_doc_for_symbol(client: OpenRouterClient, cfg: SpliceConfig, *, module: str, name: str, kind: str, code: str, qa: list[tuple[str, str]]) -> str:
+    sys_msg = {
+        "role": "system",
+        "content": (
+            "You are a precise technical writer. Produce a clear, useful Markdown document for the provided symbol."
+        ),
+    }
+    qa_lines = "\n".join([f"Q: {q}\nA: {a}" for q, a in qa])
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"Write documentation for the {kind} '{name}' from module '{module}'.\n"
+            f"Source code:\n```python\n{code}\n```\n\n"
+            f"Additional context from the author (Q&A):\n{qa_lines}\n\n"
+            "Output: A standalone Markdown doc starting with a level-1 heading '# <Name>'."
+        ),
+    }
+    try:
+        return client.complete_text([sys_msg, user_msg], cfg)
+    except GenerationError as exc:
+        return f"# {name}\nDocumentation unavailable (generation failed).\n\nError: {exc}\n"
+
+
+def run_wizard_function_spec(start_path: Path | None = None) -> None:
+    base = find_splice_directory(start_path)
+    cfg = SpliceConfig.load(start_path=base)
+    client = OpenRouterClient()
+
+    print("\n=== Function Spec Wizard ===")
+    name = _prompt("Function name: ")
+    description = _prompt("Short description: ")
+    system_prompt = _prompt("System prompt (behavioral instruction to the model): ")
+    raw_inputs = _prompt("Comma-separated input names (e.g., a, b, c): ", allow_empty=True)
+    input_names = _split_csv_names(raw_inputs)
+    inputs: dict[str, str] = {}
+    for inp in input_names:
+        typ = _prompt(f"Type for '{inp}' (e.g., int, float, str): ")
+        inputs[inp] = typ
+    output_type = _prompt("Output type (single, e.g., int, float, str): ")
+
+    # Build signature
+    params_sig = ", ".join([f"{k}: {v}" for k, v in inputs.items()])
+    signature = f"def {name}({params_sig}) -> {output_type}"
+
+    print("\nGenerating YAML spec with the LLM...")
+    # Identify custom types to guide context doc selection
+    primitive_types = {
+        "int", "float", "str", "bool", "bytes", "list", "dict", "tuple", "set", "frozenset",
+        "Any", "Optional", "Union", "Literal", "TypedDict", "Sequence", "Mapping", "Iterable",
+        "Number", "None", "Callable"
+    }
+    def _extract_type_identifiers(type_str: str) -> set[str]:
+        tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", type_str))
+        return {t for t in tokens if t not in primitive_types}
+
+    custom_type_names: set[str] = set()
+    for t in inputs.values():
+        custom_type_names.update(_extract_type_identifiers(t))
+    custom_type_names.update(_extract_type_identifiers(output_type))
+
+    # Available context docs to present to the LLM
+    available_ctx = _list_available_context_docs(base)
+    available_ctx_names = [n for n, _ in available_ctx]
+
+    sys_msg = {
+        "role": "system",
+        "content": (
+            "You produce YAML specs for a code generation system. Output ONLY YAML. "
+            "Keys: name, version, description, prompt, system_prompt, contracts{signature, inputs, output, pydantic}, context_docs, type_sources, examples. "
+            "The context_docs field must include any available docs that are relevant—especially docs for any custom (project-defined) types used in inputs or outputs."
+        ),
+    }
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"Create a function spec YAML with these fields:\n"
+            f"name: {name}\n"
+            f"version: 0.1.0\n"
+            f"description: {description}\n"
+            f"prompt: Provide a function that satisfies the contract.\n"
+            f"system_prompt: |\n{system_prompt}\n"
+            f"contracts:\n  signature: {signature}\n  inputs: {inputs}\n  output: {output_type}\n  pydantic: {{}}\n"
+            f"Available context docs (filenames): {available_ctx_names}\n"
+            f"Custom types to watch for: {sorted(custom_type_names)}\n"
+            f"context_docs: []\n"
+            f"type_sources: []\n"
+            f"examples: []\n"
+        ),
+    }
+
+    yaml_text: Optional[str] = None
+    try:
+        yaml_text = client.complete_text([sys_msg, user_msg], cfg)
+    except GenerationError as exc:
+        print(f"LLM generation failed ({exc}). Falling back to local template.")
+
+    if not yaml_text:
+        data = {
+            "name": name,
+            "version": "0.1.0",
+            "description": description,
+            "prompt": "Provide a function that satisfies the contract.",
+            "system_prompt": system_prompt,
+            "contracts": {
+                "signature": signature,
+                "inputs": inputs,
+                "output": output_type,
+                "pydantic": {},
+            },
+            "context_docs": [],
+            "type_sources": [],
+            "examples": [],
+        }
+        yaml_text = yaml.safe_dump(data, sort_keys=False)
+
+    # Try to parse/normalize before writing
+    try:
+        data = yaml.safe_load(yaml_text) or {}
+        # Enforce name consistency and required fields
+        data["name"] = name
+        data.setdefault("version", "0.1.0")
+        data.setdefault("contracts", {})
+        data["contracts"]["signature"] = signature
+        data["contracts"]["inputs"] = inputs
+        data["contracts"]["output"] = output_type
+        data["contracts"].setdefault("pydantic", {})
+        # Ensure context_docs includes best-effort matches for custom types
+        ctx_docs_model = data.get("context_docs", [])
+        if not isinstance(ctx_docs_model, list):
+            ctx_docs_model = []
+        # Heuristic match: include any doc whose filename contains the type name
+        auto_docs: list[str] = []
+        for type_name in sorted(custom_type_names):
+            for fname in available_ctx_names:
+                if type_name and type_name in fname:
+                    auto_docs.append(fname[:-3] if fname.endswith('.md') else fname)
+        # Normalize to names without .md extension
+        normalized_model = [d[:-3] if isinstance(d, str) and d.endswith('.md') else d for d in ctx_docs_model if isinstance(d, str)]
+        merged = sorted(set(normalized_model + auto_docs))
+        data["context_docs"] = merged
+        yaml_text = yaml.safe_dump(data, sort_keys=False)
+    except Exception:
+        # Keep raw YAML if parsing fails
+        pass
+
+    out_path = (base / "functions" / f"{name}.yaml")
+    if out_path.exists():
+        print(f"Spec already exists, not overwriting: {out_path}")
+    else:
+        out_path.write_text(yaml_text)
+        print(f"Wrote spec to {out_path}")
+
+
+def run_wizard_docgen(start_path: Path | None = None) -> None:
+    base = find_splice_directory(start_path)
+    cfg = SpliceConfig.load(start_path=base)
+    client = OpenRouterClient()
+
+    print("\n=== Documentation Wizard ===")
+    symbols = _discover_symbols(Path.cwd())
+    if not symbols:
+        print("No Python classes or functions discovered in the project.")
+        return
+    print(f"Discovered {len(symbols)} symbols. You'll be prompted to include or skip each.")
+
+    for module, name, kind, code in symbols:
+        resp = _prompt(f"Document {kind} '{name}' from {module}? [y/N]: ", allow_empty=True).lower()
+        if resp not in {"y", "yes"}:
+            continue
+        questions = _generate_questions_for_symbol(client, cfg, module=module, name=name, kind=kind, code=code)
+        qa: list[tuple[str, str]] = []
+        for q in questions:
+            a = _prompt(f"{q}\n> ", allow_empty=True)
+            qa.append((q, a))
+        doc_text = _generate_doc_for_symbol(client, cfg, module=module, name=name, kind=kind, code=code, qa=qa)
+        safe_module = module.replace("/", ".").replace(" ", "_")
+        out_path = (base / "context" / f"{safe_module}.{name}.md")
+        if out_path.exists():
+            print(f"Doc already exists, updating: {out_path}")
+        out_path.write_text(doc_text)
+        print(f"Wrote doc: {out_path}")
+
+
+def run_init_wizard(start_path: Path | None = None) -> None:
+    print("\nWelcome to Splice! Let's set up your functions and docs.")
+    try:
+        resp = _prompt("Create a new function spec now? [Y/n]: ", allow_empty=True).lower()
+        if resp in {"", "y", "yes"}:
+            run_wizard_function_spec(start_path=start_path)
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        print(f"Function wizard encountered an error: {exc}")
+
+    try:
+        resp = _prompt("Generate documentation for your codebase now? [Y/n]: ", allow_empty=True).lower()
+        if resp in {"", "y", "yes"}:
+            run_wizard_docgen(start_path=start_path)
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        print(f"Doc wizard encountered an error: {exc}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="splice", description="Splice CLI: init workspaces, generate docs, manage cache, and scaffold function specs.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init")
+    p_init = sub.add_parser("init")
+    p_init.add_argument("--wizard", action="store_true", help="Run interactive setup wizard after init")
 
     p_doc = sub.add_parser("docgen")
     p_doc.add_argument("--types", nargs="+", required=True)
@@ -148,7 +489,7 @@ def main(argv: List[str] | None = None) -> int:
             print("unknown")
         return 0
     if args.cmd == "init":
-        cmd_init()
+        cmd_init(wizard=getattr(args, "wizard", False))
         return 0
     if args.cmd == "docgen":
         cmd_docgen(args.types)

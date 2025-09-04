@@ -163,3 +163,108 @@ class OpenRouterClient:
         raise GenerationError("Unknown error during code generation")
 
 
+
+    def complete_text(
+        self,
+        messages: list[dict[str, str]],
+        config: SpliceConfig,
+        *,
+        request_timeout_seconds: float = 60.0,
+        max_prompt_chars: int | None = None,
+    ) -> str:
+        """Generic chat completion that returns raw text.
+
+        Parameters
+        ----------
+        messages: list[dict[str, str]]
+            Chat messages to send. Each entry should be like {"role": "system|user|assistant", "content": str}.
+        config: SpliceConfig
+            Global config providing model name/params and retry policy.
+        request_timeout_seconds: float
+            Network timeout per request.
+        max_prompt_chars: Optional[int]
+            If set, truncates the content of the longest message to this many characters to avoid token limits.
+        """
+
+        # Optionally truncate only the largest content to avoid surprising prompt loss
+        if max_prompt_chars is not None and max_prompt_chars > 0:
+            # Find the longest content field and truncate from the end (most recent context)
+            longest_idx: int | None = None
+            longest_len = -1
+            for idx, m in enumerate(messages):
+                c = str(m.get("content", ""))
+                if len(c) > longest_len:
+                    longest_len = len(c)
+                    longest_idx = idx
+            if longest_idx is not None and longest_len > max_prompt_chars:
+                m = dict(messages[longest_idx])
+                m["content"] = str(m.get("content", ""))[-max_prompt_chars:]
+                messages = list(messages)
+                messages[longest_idx] = m
+
+        payload: dict[str, Any] = {
+            "model": config.model.name,
+            "temperature": config.model.temperature,
+            "messages": messages,
+        }
+
+        reasoning_strength = getattr(config.model, "reasoning", None)
+        effort_value: Optional[str] = None
+        if isinstance(reasoning_strength, str):
+            lowered = reasoning_strength.lower().strip()
+            if lowered in {"minimal", "low", "medium", "high"}:
+                effort_value = lowered
+        elif isinstance(reasoning_strength, (int, float)):
+            if reasoning_strength <= 0:
+                effort_value = None
+            elif reasoning_strength < 2:
+                effort_value = "low"
+            elif reasoning_strength < 3:
+                effort_value = "medium"
+            else:
+                effort_value = "high"
+        if effort_value:
+            payload["reasoning"] = {"effort": effort_value}
+
+        attempts = max(int(config.retries.generation), 0) + 1
+        last_error: Exception | None = None
+
+        headers = self._auth_headers()
+
+        with httpx.Client(base_url=self.base_url, headers=headers, timeout=request_timeout_seconds) as client:
+            for _ in range(attempts):
+                try:
+                    resp = client.post("/chat/completions", json=payload)
+                    if resp.status_code >= 500:
+                        last_error = GenerationError(
+                            f"OpenRouter server error {resp.status_code}: {resp.text[:200]}"
+                        )
+                        continue
+                    if resp.status_code != 200:
+                        # 4xx/others are not retried unless more attempts remain
+                        raise GenerationError(
+                            f"OpenRouter request failed {resp.status_code}: {resp.text[:200]}"
+                        )
+
+                    data = resp.json()
+                    choices = data.get("choices") or []
+                    if not choices:
+                        raise GenerationError("No choices returned by OpenRouter")
+                    content = (
+                        (choices[0].get("message") or {}).get("content")
+                        or choices[0].get("text")
+                    )
+                    if not isinstance(content, str) or not content.strip():
+                        raise GenerationError("Empty completion content from OpenRouter")
+                    return content.strip()
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last_error = exc
+                    continue
+                except GenerationError as exc:
+                    last_error = exc
+                    continue
+
+        if last_error:
+            raise GenerationError(str(last_error))
+        raise GenerationError("Unknown error during text completion")
+
