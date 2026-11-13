@@ -1,8 +1,8 @@
-## CLI
+# CLI
 
-Splice ships a minimal CLI for initialization, editing your workspace, generating docs, and utilities.
+Splice ships a small CLI for initialising and editing a workspace, generating context docs, and inspecting the sandbox.
 
-### Commands
+## Commands
 - `splice init [--wizard]`
   - Create `.splice/` with `functions/`, `context/`, and a default `splice.yaml`.
 - `splice edit`
@@ -22,15 +22,18 @@ Splice ships a minimal CLI for initialization, editing your workspace, generatin
       - `--enable-fs|--disable-fs`, `--enable-net|--disable-net`, `--enable-subprocess|--disable-subprocess`
       - `--set-deps-policy off|if-present|allow`
       - `--set-retries-generation <n>`, `--set-retries-repair <n>`
+- `splice sandbox`
+  - Show every sandbox backend, whether this machine supports it, which one the
+    workspace will use, and the active limits and policy.
 - `splice cache purge`
   - Clear cached artifacts.
 - `splice --version`
   - Print the installed version.
 
-### Legacy commands
+## Legacy commands
 - `splice make-func <name> [--minimal|--auto]` and `splice docgen --types ...` remain available for backward compatibility, but `splice edit` replaces both.
 
-### Examples
+## Examples
 ```bash
 # Init
 splice init --wizard
@@ -51,10 +54,11 @@ splice edit --set-sandbox-imports numpy,pandas --enable-net --disable-fs
 splice edit --set-deps-policy allow --set-retries-generation 3 --set-retries-repair 2
 
 # Utilities
+splice sandbox
 splice cache purge
 ```
 
-### Interactive mode preview
+## Interactive mode preview
 Running `splice edit` opens a simple, readable menu. Use single-letter choices and Enter to navigate. Wherever applicable, fields explain what they do and you can leave them blank to keep current values. If `$EDITOR` is set, choosing “open in editor” will open the targeted file.
 
 

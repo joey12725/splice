@@ -1,58 +1,51 @@
-## Quickstart
+# Quickstart
 
-This guide walks you through creating your first function with Splice.
+## 1. Install
 
-### 1) Install and set up
 ```bash
-pip install -e '.[dev]'
-export OPENROUTER_API_KEY="sk-or-..."
+git clone https://github.com/joey12725/splice.git
+cd splice
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-### 2) Initialize the workspace
+Python 3.10+ on macOS or Linux. On Linux, `apt install bubblewrap` (or your
+distro's equivalent) enables the namespace sandbox; macOS uses the built-in
+`sandbox-exec`.
+
+## 2. Try it offline
+
 ```bash
-splice init
+python examples/quickstart.py
+python examples/calculator_demo.py --offline --define "hypotenuse" "3?4" "5?12"
 ```
 
-### 3) Scaffold a function spec
+Both use a canned code generator, so no API key is needed.
+
+## 3. Your own workspace
+
 ```bash
-splice edit --add-func my_op
+export OPENROUTER_API_KEY="..."
+splice init                     # creates .splice/ with functions/, context/, splice.yaml
+splice edit --add-func my_op    # scaffolds .splice/functions/my_op.yaml
+splice sandbox                  # shows which sandbox backend will run your code
 ```
 
-This creates `.splice/functions/my_op.yaml`. Edit it as needed.
+Edit `.splice/functions/my_op.yaml` to declare the contract (see
+[specs](specs.md)), then:
 
-### 4) (Optional) Generate docs for referenced types
-```bash
-splice edit --doc-class collections.Counter datetime.datetime
-```
-
-### 5) Call your function
 ```python
-from splice import Splice, Session
+from splice import Session, Splice
 
 session = Session.ensure()
-res = Splice().run(
-    "my_op",
-    session=session,
-    prompt="Return (a + b) / 2",
-    a=2.0,
-    b=4.0,
-)
-print(res)
+print(Splice().run("my_op", session=session, prompt="Return (a + b) / 2", a=2.0, b=4.0))
+print(Splice().run("my_op", session=session, a=10.0, b=20.0))   # cached, no model call
 ```
 
-If you only want to generate code now and run later (no test data yet):
+Generate now, run later (no test data yet):
+
 ```python
-from splice import Splice, Session
-
-sess = Session.ensure()
-# Caches generated code but does not execute and returns None
-Splice().run("my_op", session=sess, prompt="Return (a + b) / 2", run_now=False)
-# Later, execute with inputs; first run will still auto-repair on errors
-print(Splice().run("my_op", session=sess, a=2.0, b=4.0))
+Splice().run("my_op", session=session, prompt="Return (a + b) / 2", run_now=False)
 ```
 
-Next steps:
-- Explore the [Function Specs](./specs.md)
-- Configure the [Sandbox and Cache](./runtime.md)
-
-
+Next: [configuration](config.md) and the [sandbox security model](../security.md).
