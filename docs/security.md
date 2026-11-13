@@ -80,8 +80,13 @@ The code never runs in your process. Each call gets a brand-new interpreter:
 | Policy enforcement | A CPython audit hook denies opening files outside the interpreter's own install, writing anywhere but the scratch dir, sockets and DNS, `subprocess`/`os.system`/`fork`/`exec`, `ctypes`, `gc` walks, frame access, and adding or replacing audit hooks |
 | Safe results | Values return as tagged JSON. The parent never unpickles anything the sandbox produced |
 
-If the code catches a denial and carries on, the runner still reports the
-attempt and the call fails with `SandboxViolation`.
+If the code catches a denial and carries on, the attempt is still reported
+and the call fails with `SandboxViolation`. The hook writes each denial to the
+result channel the moment it happens, and it is built only from values
+captured in its own closure, so code that rebinds the runner's globals,
+`os.path.realpath` or builtins changes nothing about what the hook allows.
+Readable paths are the interpreter install and its `site-packages`; project
+roots that editable installs add to `sys.path` are pruned before the code runs.
 
 ### 3. OS sandbox
 
@@ -119,6 +124,8 @@ audit hook and no rlimits, so only the kernel sandbox is in play.
 | `bytearray(3 GiB)`, gradual 16 MiB growth | `ResourceLimitExceeded` (memory) |
 | Write a 4 MiB file with a 1 MiB cap | The write fails (`EFBIG`) |
 | Write outside the scratch dir with `allow_fs` on | `SandboxViolation` |
+| Read the project tree (on `sys.path` via an editable install) | `SandboxViolation` |
+| Rebind the runner's helpers, `os.path.realpath` and builtins, then read a secret | `SandboxViolation` |
 | 8 MiB return value | `ResourceLimitExceeded` (output) |
 | Subclass walk, module pivot, `eval`, `getattr`, frame walk, `__globals__` | `SandboxViolation` |
 | `sys.addaudithook`, `gc.get_objects`, `ctypes.CDLL` | `SandboxViolation` |

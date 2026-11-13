@@ -481,6 +481,29 @@ def test_tampering_with_the_audit_hook_is_denied(backend: Sandbox) -> None:
         run(backend, code, restricted=False)
 
 
+def test_monkeypatching_the_guard_does_not_help(backend: Sandbox, secret_file: Path) -> None:
+    code = """
+    import __main__, builtins, os, posixpath
+
+    def f(path):
+        for name in dir(__main__):
+            if callable(getattr(__main__, name)):
+                try:
+                    setattr(__main__, name, lambda *a, **k: True)
+                except Exception:
+                    pass
+        os.path.realpath = posixpath.realpath = lambda p, **k: "/usr/lib/harmless"
+        os.fsdecode = lambda p: "/usr/lib/harmless"
+        builtins.isinstance = lambda *a: False
+        builtins.any = lambda *a: True
+        builtins.len = lambda *a: 0
+        with open(path) as fh:
+            return fh.read()
+    """
+    with pytest.raises(SandboxViolation):
+        run(backend, code, restricted=False, params=("path",), kwargs={"path": str(secret_file)})
+
+
 def test_gc_walk_is_denied(backend: Sandbox) -> None:
     code = """
     import gc

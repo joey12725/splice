@@ -572,81 +572,157 @@ def _under(path: str, roots: tuple[str, ...]) -> bool:
     return any(path == root or path.startswith(root.rstrip(os.sep) + os.sep) for root in roots)
 
 
-def _resolve(path: Any) -> str | None:
-    if isinstance(path, int):
-        return None
-    try:
-        return os.path.realpath(os.fsdecode(path))
-    except Exception:
-        return ""
-
-
 def make_audit_hook(
-    policy: dict[str, Any], workdir: str, read_roots: tuple[str, ...], denials: list[str]
+    policy: dict[str, Any],
+    workdir: str,
+    read_roots: tuple[str, ...],
+    denials: list[str],
+    notify: Callable[[str], None] | None = None,
 ) -> Callable[[str, tuple[Any, ...]], None]:
     """Build the ``sys.addaudithook`` callback that enforces fs/net/process policy.
 
-    Every decision depends only on immutable values captured here, so code
-    running after installation has no switch to flip.
+    The hook must stay correct even if code with the language guard switched
+    off rebinds module globals (``__main__._under``, ``os.path.realpath``,
+    ``builtins.isinstance``...). So every helper, builtin and C function it
+    relies on is captured here as a closure local, path resolution is done
+    with captured ``lstat``/``readlink`` instead of ``os.path.realpath``, and
+    there is no mutable switch to flip. The closure itself is unreachable:
+    frame access, ``gc`` walks and new hooks are all denied.
     """
+
+    import stat as _stat_mod
+
+    _len, _isinstance, _type, _reversed = len, isinstance, type, reversed
+    _int, _bytes, _str = int, bytes, str
+    _lstat, _readlink, _fspath = os.lstat, os.readlink, os.fspath
+    _islnk = _stat_mod.S_ISLNK
+    _fs_encoding = sys.getfilesystemencoding()
+    _denied_exc = SandboxDenied
+    _oserror = OSError
+    sep = os.sep
 
     allow_fs = bool(policy.get("allow_fs"))
     allow_net = bool(policy.get("allow_net"))
     allow_proc = bool(policy.get("allow_subprocess"))
-    work = (os.path.realpath(workdir),)
+    cwd = os.path.realpath(workdir)
+    work = (cwd,)
+    roots = tuple(read_roots)
     record = denials.append
+    write_flags = _WRITE_FLAGS
+    listing_events, fs_path_events = _LISTING_EVENTS, _FS_PATH_EVENTS
+    fs_two_path_events, process_events = _FS_TWO_PATH_EVENTS, _PROCESS_EVENTS
+    process_imports, net_prefixes = _PROCESS_IMPORTS, _NET_EVENTS_PREFIXES
+    always_denied, frame_attrs = _ALWAYS_DENIED_EVENTS, _FRAME_ATTRS
+
+    def under(path: str, bases: tuple[str, ...]) -> bool:
+        for base in bases:  # noqa: SIM110 - the global any() can be rebound
+            if path == base or path.startswith(base.rstrip(sep) + sep):
+                return True
+        return False
+
+    def to_text(raw: Any) -> str | None:
+        if _isinstance(raw, _int):
+            return None
+        value = _fspath(raw)
+        if _isinstance(value, _bytes):
+            return value.decode(_fs_encoding, "surrogateescape")
+        return _str(value)
+
+    def resolve(raw: Any) -> str | None:
+        """realpath() built only from captured primitives. None means 'fd, skip'."""
+
+        try:
+            text = to_text(raw)
+        except Exception:
+            return ""
+        if text is None:
+            return None
+        if not text.startswith(sep):
+            text = cwd + sep + text
+        pending = [c for c in _reversed(text.split(sep))]
+        parts: list[str] = []
+        hops = 0
+        while pending:
+            comp = pending.pop()
+            if comp == "" or comp == ".":
+                continue
+            if comp == "..":
+                if parts:
+                    parts.pop()
+                continue
+            candidate = sep + sep.join([*parts, comp])
+            try:
+                st = _lstat(candidate)
+            except _oserror:
+                parts.append(comp)
+                continue
+            if _islnk(st.st_mode):
+                hops += 1
+                if hops > 40:
+                    return ""
+                target = _readlink(candidate)
+                if target.startswith(sep):
+                    parts = []
+                pending.extend(_reversed(target.split(sep)))
+                continue
+            parts.append(comp)
+        return sep + sep.join(parts)
 
     def deny(reason: str) -> None:
         record(reason)
-        raise SandboxDenied(f"splice sandbox: {reason}")
+        if notify is not None:
+            notify(reason)
+        raise _denied_exc(f"splice sandbox: {reason}")
 
     def writable(path: str | None) -> bool:
-        return allow_fs and path is not None and _under(path, work)
+        return allow_fs and path is not None and under(path, work)
 
     def hook(event: str, args: tuple[Any, ...]) -> None:
         if event == "open":
-            path = _resolve(args[0])
+            path = resolve(args[0])
             if path is None:
                 return
-            mode = args[1] if len(args) > 1 else None
-            flags = args[2] if len(args) > 2 else 0
-            if isinstance(mode, str):
-                write = any(c in mode for c in "wax+")
+            mode = args[1] if _len(args) > 1 else None
+            flags = args[2] if _len(args) > 2 else 0
+            if _type(mode) is _str:
+                text_mode = _str(mode)
+                write = "w" in text_mode or "a" in text_mode or "x" in text_mode or "+" in text_mode
             else:
-                write = bool((flags or 0) & _WRITE_FLAGS)
+                write = ((flags or 0) & write_flags) != 0
             if writable(path):
                 return
-            if not write and _under(path, read_roots):
+            if not write and under(path, roots):
                 return
-            deny(f"filesystem access denied: {os.fsdecode(args[0])}")
-        elif event in _LISTING_EVENTS:
+            deny(f"filesystem access denied: {path}")
+        elif event in listing_events:
             raw = args[0] if args else "."
-            path = _resolve("." if raw is None else raw)
-            if path is None or writable(path) or _under(path, read_roots):
+            path = resolve("." if raw is None else raw)
+            if path is None or writable(path) or under(path, roots):
                 return
-            deny(f"directory listing denied: {raw}")
-        elif event in _FS_PATH_EVENTS:
-            path = _resolve(args[0]) if args else ""
+            deny(f"directory listing denied: {path}")
+        elif event in fs_path_events:
+            path = resolve(args[0]) if args else ""
             if not writable(path):
                 deny(f"filesystem modification denied ({event})")
-        elif event in _FS_TWO_PATH_EVENTS:
-            if not all(writable(_resolve(a)) for a in args[:2]):
-                deny(f"filesystem modification denied ({event})")
-        elif event in _PROCESS_EVENTS:
+        elif event in fs_two_path_events:
+            for raw in args[:2]:
+                if not writable(resolve(raw)):
+                    deny(f"filesystem modification denied ({event})")
+        elif event in process_events:
             if not allow_proc:
                 deny(f"process creation denied ({event})")
         elif event == "import":
             # _posixsubprocess.fork_exec raises no audit event of its own.
-            if not allow_proc and args and args[0] in _PROCESS_IMPORTS:
+            if not allow_proc and args and args[0] in process_imports:
                 deny(f"process creation denied (import {args[0]})")
-        elif event.startswith(_NET_EVENTS_PREFIXES):
+        elif event.startswith(net_prefixes):
             if not allow_net:
                 deny(f"network access denied ({event})")
         elif event.startswith("ctypes.") or event.startswith("gc."):
             deny(f"low-level introspection denied ({event})")
-        elif event in _ALWAYS_DENIED_EVENTS:
+        elif event in always_denied:
             deny(f"operation denied ({event})")
-        elif event == "object.__getattr__" and len(args) > 1 and args[1] in _FRAME_ATTRS:
+        elif event == "object.__getattr__" and _len(args) > 1 and args[1] in frame_attrs:
             deny("frame introspection denied")
 
     return hook
@@ -817,55 +893,119 @@ def _run(req: dict[str, Any], workdir: str) -> dict[str, Any]:
     roots = _read_roots(req.get("sys_path") or [])
     _prune_sys_path(roots)
     denials: list[str] = []
-    sys.addaudithook(make_audit_hook(policy, workdir, roots, denials))
+    notice = _denial_notifier(str(req.get("nonce") or "splice"))
+    sys.addaudithook(make_audit_hook(policy, workdir, roots, denials, notice))
+    return _execute(
+        compiled,
+        namespace,
+        fn_name,
+        expected,
+        kwargs,
+        allow_proc=allow_proc,
+        denials=denials,
+        max_chars=int(req.get("max_output_chars") or 65536),
+    )
 
-    max_chars = int(req.get("max_output_chars") or 65536)
+
+def _denial_notifier(nonce: str) -> Callable[[str], None]:
+    """Write each denial straight to the result channel as it happens.
+
+    The parent fails the call on any such line, so a violation is reported
+    even if the code later tampers with the runner's own reporting path.
+    """
+
+    write = os.write
+    prefix = (nonce + " DENIED ").encode("ascii")
+
+    def notify(reason: str) -> None:
+        try:
+            write(1, prefix + reason.encode("utf-8", "replace").replace(b"\n", b" ") + b"\n")
+        except OSError:
+            pass
+
+    return notify
+
+
+def _execute(
+    compiled: Any,
+    namespace: dict[str, Any],
+    fn_name: str,
+    expected: list[str],
+    kwargs: dict[str, Any],
+    *,
+    allow_proc: bool,
+    denials: list[str],
+    max_chars: int,
+) -> dict[str, Any]:
+    """Run the generated code. Everything used after ``exec`` is captured first,
+    because the code may rebind module globals and builtins."""
+
+    _denied, _memory, _blocking, _recursion = (
+        SandboxDenied,
+        MemoryError,
+        BlockingIOError,
+        RecursionError,
+    )
+    _base, _lookup, _typeerror = BaseException, LookupError, TypeError
+    _callable, _list, _len, _type, _str = callable, list, len, type, str
+    _encode = encode_value
+    _eagain = errno.EAGAIN
+    _sys = sys
+    real_out, real_err = sys.__stdout__, sys.__stderr__
+
     out, err = _CappedText(max_chars), _CappedText(max_chars)
+    _getvalue_out, _getvalue_err = out.getvalue, err.getvalue
     sys.stdout, sys.stderr = out, err
     status: dict[str, Any]
     try:
         exec(compiled, namespace, namespace)
         fn = namespace.get(fn_name)
-        if not callable(fn):
-            raise LookupError(f"function '{fn_name}' not found in generated code")
-        params = list(
-            fn.__code__.co_varnames[: fn.__code__.co_argcount + fn.__code__.co_kwonlyargcount]
-        )
-        if params[: len(expected)] != expected:
-            raise TypeError(
+        if not _callable(fn):
+            raise _lookup(f"function '{fn_name}' not found in generated code")
+        code_obj = fn.__code__
+        params = _list(code_obj.co_varnames[: code_obj.co_argcount + code_obj.co_kwonlyargcount])
+        if params[: _len(expected)] != expected:
+            raise _typeerror(
                 f"generated function parameters {params} do not match contract {expected}"
             )
         value = fn(**kwargs)
-        status = {"status": "ok", "value": encode_value(value)}
-    except SandboxDenied as exc:
-        status = {"status": "violation", "message": str(exc)}
-    except MemoryError:
+        status = {"status": "ok", "value": _encode(value)}
+    except _denied as exc:
+        status = {"status": "violation", "message": _str(exc)}
+    except _memory:
         status = {"status": "resource", "message": "memory limit exceeded"}
-    except BlockingIOError as exc:
-        if not allow_proc and exc.errno == errno.EAGAIN:
+    except _blocking as exc:
+        if not allow_proc and exc.errno == _eagain:
             # fork()/clone() refused by RLIMIT_NPROC
             status = {
                 "status": "violation",
                 "message": "splice sandbox: process creation denied (process limit)",
             }
         else:
-            status = {"status": "error", "error_type": type(exc).__name__, "message": str(exc)}
-    except RecursionError as exc:
-        status = {"status": "error", "error_type": "RecursionError", "message": str(exc)}
-    except BaseException as exc:
-        status = {"status": "error", "error_type": type(exc).__name__, "message": str(exc)}
+            status = {"status": "error", "error_type": _type(exc).__name__, "message": _str(exc)}
+    except _recursion as exc:
+        status = {"status": "error", "error_type": "RecursionError", "message": _str(exc)}
+    except _base as exc:
+        status = {"status": "error", "error_type": _type(exc).__name__, "message": _str(exc)}
     finally:
-        sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+        _sys.stdout, _sys.stderr = real_out, real_err
 
     if denials and status["status"] != "violation":
         # The code caught the denial and carried on; still report it.
         status = {"status": "violation", "message": f"splice sandbox: {denials[0]}"}
-    status["stdout"] = out.getvalue()
-    status["stderr"] = err.getvalue()
+    status["stdout"] = _getvalue_out()
+    status["stderr"] = _getvalue_err()
     return status
 
 
 def main() -> None:
+    # Captured up front: the generated code runs inside _run and may rebind
+    # module globals or builtins before control returns here.
+    dumps, write, exit_, view_of = json.dumps, os.write, os._exit, memoryview
+    base_exc, type_error, value_error, os_error = BaseException, TypeError, ValueError, OSError
+    _type, _str = type, str
+    protocol = PROTOCOL_VERSION
+
     raw = sys.stdin.buffer.read()
     try:
         fd = os.open(os.devnull, os.O_RDONLY)
@@ -879,29 +1019,23 @@ def main() -> None:
         req = json.loads(raw)
         nonce = str(req.get("nonce") or nonce)
         result = _run(req, os.getcwd())
-    except BaseException as exc:
-        result = {"status": "error", "error_type": type(exc).__name__, "message": str(exc)}
-    result["protocol"] = PROTOCOL_VERSION
+    except base_exc as exc:
+        result = {"status": "error", "error_type": _type(exc).__name__, "message": _str(exc)}
+    result["protocol"] = protocol
     try:
-        line = (nonce + " " + json.dumps(result, allow_nan=False) + "\n").encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        line = (
-            nonce
-            + " "
-            + json.dumps(
-                {"status": "error", "error_type": "SerializationError", "message": str(exc)}
-            )
-            + "\n"
-        ).encode("utf-8")
-    view = memoryview(line)
+        line = (nonce + " " + dumps(result, allow_nan=False) + "\n").encode("utf-8")
+    except (type_error, value_error) as exc:
+        fallback = {"status": "error", "error_type": "SerializationError", "message": _str(exc)}
+        line = (nonce + " " + dumps(fallback) + "\n").encode("utf-8")
+    view = view_of(line)
     while view:
         try:
-            n = os.write(1, view)
-        except OSError:
+            n = write(1, view)
+        except os_error:
             break
         view = view[n:]
     # Skip interpreter teardown: atexit handlers and finalizers belong to untrusted code.
-    os._exit(0)
+    exit_(0)
 
 
 if __name__ == "__main__":

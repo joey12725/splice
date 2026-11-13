@@ -1,5 +1,9 @@
 # Splice
 
+[![CI](https://github.com/joey12725/splice/actions/workflows/ci.yml/badge.svg)](https://github.com/joey12725/splice/actions/workflows/ci.yml)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
 **Describe a function in plain English, call it like any other Python function, and let Splice generate it once, cache it, and run it inside a hardened sandbox.**
 
 Splice is for the parts of an app where users get to decide what the code does: a calculator whose `?` operator means whatever you say it means, a pricing rule a customer types into a form, a data transform described in a ticket. You declare the contract once in YAML. Splice turns each prompt into a typed function with an LLM, caches it per session, checks inputs and outputs against the contract, repairs it when it breaks, and never lets it run in your process.
@@ -90,7 +94,7 @@ The escape suite in [`tests/test_sandbox_escapes.py`](tests/test_sandbox_escapes
 | `while True: pass`, `time.sleep(60)`, CPU spin | `ExecutionTimeout` / `ResourceLimitExceeded` |
 | `bytearray(3 GiB)`, gradual allocation, 8 MiB result | `ResourceLimitExceeded` |
 | Subclass walk, module pivot, `__globals__`, frame walk | `SandboxViolation` |
-| `sys.addaudithook`, `gc.get_objects`, `ctypes.CDLL` | `SandboxViolation` |
+| `sys.addaudithook`, `gc.get_objects`, `ctypes.CDLL`, rebinding the guard's helpers | `SandboxViolation` |
 | Return an object whose `__reduce__` runs a shell command | `SerializationError`; nothing executes in the parent |
 
 `splice sandbox` shows what your machine supports:

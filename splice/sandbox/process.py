@@ -360,6 +360,9 @@ class ProcessSandbox(Sandbox):
                 f"execution exceeded the {limits.max_output_kb} KB output limit"
             )
 
+        denial = _find_denial(stdout, nonce)
+        if denial is not None:
+            raise SandboxViolation(f"splice sandbox: {denial}")
         response = _find_response(stdout, nonce)
         if response is None:
             raise _exit_error(returncode, stderr, limits.cpu_seconds, limits.memory_mb, self.name)
@@ -411,6 +414,14 @@ def encode_request(request: ExecutionRequest, policy: SandboxPolicy, nonce: str)
         "max_output_chars": limits.max_output_kb * 1024,
     }
     return json.dumps(body, allow_nan=False).encode("utf-8")
+
+
+def _find_denial(stdout: bytes, nonce: str) -> str | None:
+    marker = nonce.encode("ascii") + b" DENIED "
+    for line in stdout.splitlines():
+        if line.startswith(marker):
+            return line[len(marker) :].decode("utf-8", "replace")
+    return None
 
 
 def _find_response(stdout: bytes, nonce: str) -> dict[str, Any] | None:
