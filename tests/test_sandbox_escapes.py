@@ -433,8 +433,8 @@ def test_print_flood_does_not_corrupt_result(backend: Sandbox) -> None:
     [
         # Classic subclass walk to os._wrap_close
         "def f():\n    return ().__class__.__base__.__subclasses__()\n",
-        # Module attribute pivot: statistics imports sys
-        "import statistics\ndef f():\n    return statistics.sys.modules['os'].getcwd()\n",
+        # Module attribute pivot: fractions imports sys
+        "import fractions\ndef f():\n    return fractions.sys.modules['os'].getcwd()\n",
         "import math\ndef f():\n    return math.__loader__\n",
         # Builtins that hand out the keys to the kingdom
         "def f():\n    return __import__('os').getcwd()\n",
@@ -455,7 +455,7 @@ def test_print_flood_does_not_corrupt_result(backend: Sandbox) -> None:
 )
 def test_language_guard_blocks_known_escapes(backend: Sandbox, code: str) -> None:
     with pytest.raises(SandboxViolation):
-        run(backend, code)
+        run(backend, code, allow_imports=("math", "statistics", "fractions"))
 
 
 def test_tampering_with_the_audit_hook_is_denied(backend: Sandbox) -> None:

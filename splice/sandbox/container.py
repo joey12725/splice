@@ -57,7 +57,13 @@ class ContainerSandbox(ProcessSandbox):
         mem = f"{max(int(limits.memory_mb), 16)}m"
         fsize = max(int(limits.max_file_size_mb), 1) * 1024 * 1024
         env = dict(_BASE_ENV)
-        env.update({"HOME": CONTAINER_WORKDIR, "TMPDIR": CONTAINER_WORKDIR})
+        env.update(
+            {
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "HOME": CONTAINER_WORKDIR,
+                "TMPDIR": CONTAINER_WORKDIR,
+            }
+        )
         env.update({str(k): str(v) for k, v in policy.env.items()})
         cmd = [
             shutil.which(self.runtime) or self.runtime,
