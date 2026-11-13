@@ -71,6 +71,14 @@ def resolve_python(python: str | None) -> str:
     return found
 
 
+_PROBE_ROOTS = (
+    "import json, site, sys, sysconfig; p = sysconfig.get_paths(); print(json.dumps("
+    "[sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix]"
+    " + site.getsitepackages()"
+    " + [p.get(k, '') for k in ('stdlib', 'platstdlib', 'purelib', 'platlib')]))"
+)
+
+
 def python_read_roots(python: str, extra: Sequence[str] = ()) -> list[str]:
     """Directories a sandboxed interpreter must be able to read to start up."""
 
@@ -86,13 +94,7 @@ def python_read_roots(python: str, extra: Sequence[str] = ()) -> list[str]:
         ]
     else:
         probe = subprocess.run(
-            [
-                python,
-                "-I",
-                "-c",
-                "import sys,json;print(json.dumps([sys.prefix,sys.base_prefix,sys.exec_prefix,"
-                "sys.base_exec_prefix]+[p for p in sys.path if p]))",
-            ],
+            [python, "-I", "-c", _PROBE_ROOTS],
             capture_output=True,
             text=True,
             timeout=30,

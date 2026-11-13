@@ -67,7 +67,7 @@ under the new policy.
 ```python
 from splice import SpliceConfig
 
-cfg = SpliceConfig.load()             # nearest .splice/splice.yaml, or defaults
+cfg = SpliceConfig.load()  # nearest .splice/splice.yaml, or defaults
 cfg = SpliceConfig.from_dict({"sandbox": {"backend": "docker", "memory_mb": 256}})
 ```
 

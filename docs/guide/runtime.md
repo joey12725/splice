@@ -12,7 +12,7 @@ from splice import Session, Splice
 alice, bob = Session.ensure(), Session.ensure()
 sp = Splice()
 sp.run("blend", session=alice, prompt="Return the average of a and b", a=1.0, b=3.0)  # 2.0
-sp.run("blend", session=bob, prompt="Return a to the power of b", a=2.0, b=3.0)       # 8.0
+sp.run("blend", session=bob, prompt="Return a to the power of b", a=2.0, b=3.0)  # 8.0
 ```
 
 ## A call, step by step

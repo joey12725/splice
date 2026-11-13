@@ -726,12 +726,26 @@ class _CappedText(io.StringIO):
 
 
 def _read_roots(extra: list[str]) -> tuple[str, ...]:
+    """Directories the code may read: the interpreter install and its site-packages.
+
+    Deliberately *not* every ``sys.path`` entry: editable installs add project
+    roots through ``.pth`` files, and a project root can hold ``.env`` files.
+    """
+
+    import site
+    import sysconfig
+
     candidates = [sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix]
-    candidates += [p for p in sys.path if p]
+    candidates += [p for p in site.getsitepackages() if p]
+    paths = sysconfig.get_paths()
+    candidates += [paths.get(k, "") for k in ("stdlib", "platstdlib", "purelib", "platlib")]
+    candidates += [p for p in sys.path if p.endswith(".zip")]
     candidates += extra
     candidates += ["/usr/share/zoneinfo", "/dev/null", "/dev/urandom"]
     roots: list[str] = []
     for c in candidates:
+        if not c:
+            continue
         try:
             r = os.path.realpath(c)
         except Exception:
@@ -739,6 +753,12 @@ def _read_roots(extra: list[str]) -> tuple[str, ...]:
         if r and r != os.sep and r not in roots:
             roots.append(r)
     return tuple(roots)
+
+
+def _prune_sys_path(roots: tuple[str, ...]) -> None:
+    """Drop import paths outside the read roots so finders never touch them."""
+
+    sys.path[:] = [p for p in sys.path if p and _under(os.path.realpath(p), roots)]
 
 
 def _run(req: dict[str, Any], workdir: str) -> dict[str, Any]:
@@ -794,10 +814,10 @@ def _run(req: dict[str, Any], workdir: str) -> dict[str, Any]:
     if not allow_proc:
         deny_new_processes()
 
+    roots = _read_roots(req.get("sys_path") or [])
+    _prune_sys_path(roots)
     denials: list[str] = []
-    sys.addaudithook(
-        make_audit_hook(policy, workdir, _read_roots(req.get("sys_path") or []), denials)
-    )
+    sys.addaudithook(make_audit_hook(policy, workdir, roots, denials))
 
     max_chars = int(req.get("max_output_chars") or 65536)
     out, err = _CappedText(max_chars), _CappedText(max_chars)

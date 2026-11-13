@@ -39,7 +39,7 @@ from splice import Session, Splice
 
 session = Session.ensure()
 print(Splice().run("my_op", session=session, prompt="Return (a + b) / 2", a=2.0, b=4.0))
-print(Splice().run("my_op", session=session, a=10.0, b=20.0))   # cached, no model call
+print(Splice().run("my_op", session=session, a=10.0, b=20.0))  # cached, no model call
 ```
 
 Generate now, run later (no test data yet):

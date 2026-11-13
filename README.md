@@ -175,7 +175,7 @@ class FirejailSandbox(ProcessSandbox):
         return ["firejail", "--quiet", "--net=none", f"--private={workdir}", *command]
 
 
-register_backend("firejail", FirejailSandbox)   # now selectable as sandbox.backend: firejail
+register_backend("firejail", FirejailSandbox)  # now selectable as sandbox.backend: firejail
 sp = Splice(client=MyGenerator(), sandbox=FirejailSandbox())
 ```
 

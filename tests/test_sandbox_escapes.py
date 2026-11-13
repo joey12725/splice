@@ -168,6 +168,18 @@ def test_real_home_directory_is_not_readable(backend: Sandbox) -> None:
         run(backend, code, restricted=False, params=("home",), kwargs={"home": home})
 
 
+def test_project_tree_is_not_readable(backend: Sandbox) -> None:
+    # Editable installs put the project root on sys.path; it must not become readable.
+    project_file = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    code = """
+    def f(path):
+        with open(path) as fh:
+            return fh.read()
+    """
+    with pytest.raises(SandboxViolation):
+        run(backend, code, restricted=False, params=("path",), kwargs={"path": str(project_file)})
+
+
 def test_swallowed_denial_is_still_reported(backend: Sandbox, secret_file: Path) -> None:
     code = """
     def f(path):
