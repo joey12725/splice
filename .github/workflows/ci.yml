@@ -2,30 +2,69 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .[dev]
-      - name: Lint
-        run: |
-          ruff check .
-      - name: Type-check
-        run: |
-          mypy splice
-      - name: Tests
-        run: |
-          pytest -q
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy splice
 
+  linux:
+    name: linux / py${{ matrix.python }} (process + bubblewrap)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run: pip install -e ".[dev]"
+      - run: splice sandbox
+      - run: pytest -rs
 
+  macos:
+    name: macos / py3.12 (process + seatbelt)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: splice sandbox
+      - run: pytest -rs
+
+  containers:
+    name: linux / docker backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: docker pull python:3.12-slim
+      - run: pytest -rs tests/test_sandbox_escapes.py -k docker
+        env:
+          SPLICE_TEST_CONTAINERS: "1"

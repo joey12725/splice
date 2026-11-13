@@ -5,6 +5,7 @@ Use `Session.ensure()` to create/reuse an opaque session id. Cache and dependenc
 
 ```python
 from splice import Session
+
 sess = Session.ensure()
 ```
 
@@ -13,11 +14,11 @@ sess = Session.ensure()
 from splice import Splice
 
 result = Splice().run(
-  "generic_operand",
-  session=sess,
-  prompt="Return max(a, b)",
-  a=3.0,
-  b=5.0,
+    "generic_operand",
+    session=sess,
+    prompt="Return max(a, b)",
+    a=3.0,
+    b=5.0,
 )
 ```
 

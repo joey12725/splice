@@ -31,11 +31,11 @@ from splice import Splice, Session
 
 session = Session.ensure()
 res = Splice().run(
-  "my_op",
-  session=session,
-  prompt="Return (a + b) / 2",
-  a=2.0,
-  b=4.0,
+    "my_op",
+    session=session,
+    prompt="Return (a + b) / 2",
+    a=2.0,
+    b=4.0,
 )
 print(res)
 ```

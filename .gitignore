@@ -1,13 +1,17 @@
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .venv/
-.splice/
-.splice/db.sqlite
-.splice/cache/
+venv/
+build/
 dist/
 *.egg-info/
+.coverage
+htmlcov/
+.DS_Store
 
-
+# Splice workspaces created while trying things out
+.splice/
+agents.md

@@ -1,0 +1,17 @@
+name: blend
+version: 0.1.0
+description: Combine two numbers in a way the caller describes in plain English.
+prompt: ""
+contracts:
+  signature: "def blend(a: float, b: float) -> float"
+  inputs:
+    a: float
+    b: float
+  output: float
+context_docs: []
+type_sources: []
+examples:
+  - prompt: Return the larger of the two numbers
+    function: |
+      def blend(a: float, b: float) -> float:
+          return max(a, b)

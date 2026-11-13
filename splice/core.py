@@ -1,247 +1,269 @@
+"""The :class:`Splice` runtime: generate once, cache, execute in a sandbox, repair."""
+
 from __future__ import annotations
 
+import time
 import uuid
+import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Protocol
+
+from .config import SpliceConfig
+from .deps import prepare_dependencies
+from .errors import ExecutionError, PromptRequiredError, SandboxViolation, ValidationError
+from .executor import Executor
+from .paths import require_splice_directory
+from .prompt import PromptBundle, bundle_prompt, load_context_docs
+from .specs import FunctionSpec, load_function_spec
+from .store import ArtifactKey, ArtifactStore, resolve_database_path
+from .validation import build_validators
+
+if TYPE_CHECKING:
+    from .sandbox import Sandbox
+
+_BUILTIN_TYPE_NAMES = frozenset(
+    {
+        "int",
+        "float",
+        "str",
+        "bool",
+        "bytes",
+        "list",
+        "dict",
+        "tuple",
+        "set",
+        "object",
+        "typing",
+        "None",
+        "Any",
+    }
+)
+
+
+class CodeGenerator(Protocol):
+    """Anything that turns a prompt bundle into Python source.
+
+    :class:`splice.client.OpenRouterClient` is the default; tests and offline
+    demos pass their own.
+    """
+
+    def generate_code(self, bundle: PromptBundle, config: SpliceConfig) -> str: ...
 
 
 @dataclass(frozen=True)
 class Session:
-    """Opaque session token wrapper.
-
-    Phase 0: minimal implementation with a helper to ensure a session exists.
-    """
+    """Opaque session token. Generated code is cached per session."""
 
     id: str
 
     @staticmethod
     def ensure(existing: Session | None = None) -> Session:
-        """Return the provided session or create a new one.
-
-        Parameters
-        ----------
-        existing: Optional[Session]
-            An existing session to reuse.
-        """
+        """Return ``existing`` or create a fresh session."""
 
         if existing is not None:
             return existing
         return Session(id=str(uuid.uuid4()))
 
 
-class Splice:
-    """Top-level entry point for the Splice runtime (Phases 1–5).
+def _required_modules(spec: FunctionSpec) -> list[str]:
+    """Top-level modules named by the contract types and ``type_sources``."""
 
-    Provides spec loading and `run` which generates code via the client,
-    caches it per-session in SQLite, and executes it in the sandbox.
+    roots: set[str] = set()
+    paths = [*spec.contracts.inputs.values(), spec.contracts.output]
+    paths += [str(ts.get("import", "")) for ts in spec.type_sources]
+    for path in paths:
+        root = str(path).split(".")[0].split("[")[0].strip()
+        if root and root.isidentifier() and root not in _BUILTIN_TYPE_NAMES and "." in str(path):
+            roots.add(root)
+    return sorted(roots)
+
+
+class Splice:
+    """Top-level entry point.
+
+    >>> sp = Splice()
+    >>> sp.run("my_op", session=Session.ensure(), prompt="Return (a + b) / 2", a=4.0, b=6.0)
+    5.0
+
+    Parameters
+    ----------
+    config_path:
+        Explicit path to ``splice.yaml``. Defaults to the nearest ``.splice/``.
+    client:
+        Code generator. Defaults to :class:`~splice.client.OpenRouterClient`.
+    sandbox:
+        Execution backend. Defaults to ``sandbox.backend`` from config.
     """
 
-    def __init__(self, config_path: str | None = None) -> None:
-        self._config_path: str | None = config_path
-        self._config_cache = None
+    def __init__(
+        self,
+        config_path: str | None = None,
+        *,
+        client: CodeGenerator | None = None,
+        sandbox: Sandbox | None = None,
+    ) -> None:
+        self._config_path = config_path
+        self._client = client
+        self._sandbox = sandbox
 
-    def _config(self) -> "SpliceConfig":
-        from .config import SpliceConfig
+    def spec(self, name: str, start_path: Path | None = None) -> FunctionSpec:
+        return load_function_spec(name, start_path=start_path)
 
-        if self._config_cache is None:
-            self._config_cache = SpliceConfig.load(self._config_path)
-        return self._config_cache
+    def _make_client(self) -> CodeGenerator:
+        if self._client is not None:
+            return self._client
+        from . import client as client_module  # looked up at call time so tests can patch it
 
-    def spec(self, name: str) -> "FunctionSpec":
-        from .specs import FunctionSpec, load_function_spec
-
-        spec: FunctionSpec = load_function_spec(name)
-        return spec
+        return client_module.OpenRouterClient()
 
     def run(
         self,
         name: str,
         *,
-        session: "Session",
+        session: Session,
         prompt: str | None = None,
-        start_path: "Path | None" = None,
+        start_path: Path | None = None,
         run_now: bool = True,
         **kwargs: Any,
     ) -> Any:
-        """Generate or reuse code for `name` and execute with kwargs.
+        """Generate (or reuse) code for spec ``name`` and call it with ``kwargs``.
 
-        - Requires `prompt` on first call for (session, name) with given inputs.
-        - Caches by (session_id, name, prompt_hash, spec_hash, context_hash, config_hash).
+        * The first call for a ``(session, name)`` pair needs ``prompt``; later
+          calls reuse the cached function as long as the spec, context docs and
+          config are unchanged.
+        * ``run_now=False`` generates and caches without executing.
+        * If execution fails, the error is fed back to the model for up to
+          ``retries.repair`` repair attempts.
         """
 
-        from pathlib import Path
-        from .client import OpenRouterClient
-        from .executor import Executor
-        from .prompt import bundle_prompt
-        from .store import ArtifactStore, ArtifactKey
-        from .paths import require_splice_directory
-        from .deps import prepare_dependencies
-        import time
-
         base = require_splice_directory(start_path)
-        # Load config relative to base so tests using tmp .splice work
-        from .config import SpliceConfig
         cfg = SpliceConfig.load(self._config_path, start_path=base)
-        from .specs import load_function_spec
-        spec = load_function_spec(name, start_path=start_path)
-        # Initialize client once per run to allow stateful fakes in tests
-        client = OpenRouterClient()
-        db_path = Path(cfg.logging.database)
-        if not db_path.is_absolute():
-            db_path = (base / Path(cfg.logging.database)).resolve()
-        store = ArtifactStore(database_path=db_path, start_path=base)
+        spec = load_function_spec(name, start_path=base)
+        store = self._open_store(cfg, base)
         store.ensure_session(session.id)
-        # Purge expired artifacts before attempting a cache read, so TTL is enforced
-        try:
-            store.purge_expired(cfg.sessions.ttl)
-        except Exception:
-            pass
+        store.purge_expired(cfg.sessions.ttl)
 
-        # Compute cache keys
-        # Spec hash: use the raw YAML file contents
-        spec_path = base / "functions" / f"{name}.yaml"
-        spec_text = spec_path.read_text() if spec_path.exists() else ""
-        config_path = base / "splice.yaml"
-        config_text = config_path.read_text() if config_path.exists() else ""
-
-        # Context docs merged text
-        from .prompt import _load_context_docs  # reuse loader
-
-        context_pairs = _load_context_docs(spec.context_docs, base)
-        merged_docs = "\n\n".join([content for _, content in context_pairs])
-
-        # If caller explicitly does not want to run and provided no prompt,
-        # there is nothing to do (no generation or execution). Emit a warning and return.
         if not run_now and prompt is None:
-            import warnings as _warnings
-
-            _warnings.warn(
+            warnings.warn(
                 "Splice.run(run_now=False) called without a prompt: nothing to generate or run.",
                 stacklevel=2,
             )
             return None
 
-        # Prompt is session-scoped. If missing and no cached artifact, error (unless run_now=False handled above).
-        active_prompt = prompt if prompt is not None else spec.prompt
-        from .store import ArtifactStore as _AS
-        prompt_hash = _AS.hash_prompt(active_prompt)
-        key = ArtifactKey(
-            session_id=session.id,
-            function_name=name,
-            prompt_hash=prompt_hash,
-            spec_hash=_AS.hash_spec_yaml(spec_text),
-            context_hash=_AS.hash_context_docs(merged_docs),
-            config_hash=_AS.hash_config_yaml(config_text),
-        )
+        key = self._cache_key(session, name, spec, prompt, base)
+        client: CodeGenerator | None = None
 
-        # Enforce TTL by using get_fresh which deletes expired entries
-        art = store.get_fresh(key, cfg.sessions.ttl)
-        if art is None:
-            # Allow reusing latest code for this session/function if spec/context/config match
-            latest = store.get_latest_for_session(
-                session_id=session.id,
-                function_name=name,
-                spec_hash=key.spec_hash,
-                context_hash=key.context_hash,
-                config_hash=key.config_hash,
+        def generate(session_prompt: str, note: str = "") -> str:
+            nonlocal client
+            client = client or self._make_client()
+            bundle = bundle_prompt(spec, cfg, session_prompt=session_prompt, start_path=base)
+            store.write_event("generation_requested", session.id, name, note)
+            started = time.perf_counter()
+            code = client.generate_code(bundle, cfg)
+            elapsed = (time.perf_counter() - started) * 1000.0
+            store.put(key, code)
+            store.write_event(
+                "generation_succeeded",
+                session.id,
+                name,
+                f"{note + ' ' if note else ''}duration_ms={elapsed:.1f}",
             )
-            if latest is not None and prompt is None:
-                art_code = latest.code
-            else:
-                if prompt is None:
-                    raise ValueError("Prompt required on first call for this session/function")
-                bundle = bundle_prompt(spec, cfg, session_prompt=prompt, start_path=base)
-                # Phase 10: generation timing and event
-                store.write_event("generation_requested", session.id, name, "")
-                gen_start = time.perf_counter()
-                code_text = client.generate_code(bundle, cfg)
-                gen_ms = (time.perf_counter() - gen_start) * 1000.0
-                store.put(key, code_text)
-                store.write_event("generation_succeeded", session.id, name, f"duration_ms={gen_ms:.1f}")
-                art_code = code_text
-        else:
-            art_code = art.code
+            return code
 
-        # If generation-only was requested (run_now=False with a prompt), return without executing.
+        code = self._cached_code(store, key, cfg, prompt_given=prompt is not None)
+        if code is None:
+            if prompt is None:
+                raise PromptRequiredError(
+                    f"No cached code for '{name}' in this session; pass prompt= on the first call"
+                )
+            code = generate(prompt)
+
         if not run_now:
             return None
 
-        # Phase 6: validate inputs pre-execution
-        from .validation import build_validators
         validators = build_validators(spec)
         for arg_name, validator in validators.input_validators.items():
             if arg_name in kwargs:
                 kwargs[arg_name] = validator(kwargs[arg_name])
 
-        # Phase 11: dependency policy hookup — compute required modules from spec
-        # Derive root module names from contracts types and type_sources import paths
-        def _root_module(path_str: str) -> str | None:
-            if not isinstance(path_str, str) or not path_str:
-                return None
-            root = (path_str.split(".")[0]).strip()
-            # skip builtins and typing
-            if root in {"int", "float", "str", "bool", "bytes", "list", "dict", "tuple", "set", "object"}:
-                return None
-            if root == "typing":
-                return None
-            return root
-
-        required_modules_set: set[str] = set()
-        for t in list(spec.contracts.inputs.values()) + [spec.contracts.output]:
-            r = _root_module(str(t))
-            if r:
-                required_modules_set.add(r)
-        for ts in spec.type_sources:
-            imp = str(ts.get("import", ""))
-            r = _root_module(imp)
-            if r:
-                required_modules_set.add(r)
-        required_modules = sorted(required_modules_set)
         extra_sys_paths = prepare_dependencies(
             policy=cfg.dependencies.policy,
-            modules=required_modules,
+            modules=_required_modules(spec),
             start_path=base,
             session_id=session.id,
         )
 
-        # Phase 10: auto-repair loop around execution
-        # Ensure at least one repair attempt (2 total tries)
         attempts = max(int(cfg.retries.repair), 0) + 1
-        last_exc: Exception | None = None
         for attempt in range(attempts):
-            exec_start = time.perf_counter()
+            started = time.perf_counter()
             try:
-                result = Executor.run(art_code, spec.contracts.signature, kwargs, cfg, extra_sys_paths=extra_sys_paths)
-                exec_ms = (time.perf_counter() - exec_start) * 1000.0
-                # Phase 6: validate output post-execution
+                result = Executor.run(
+                    code,
+                    spec.contracts.signature,
+                    kwargs,
+                    cfg,
+                    extra_sys_paths=extra_sys_paths,
+                    sandbox=self._sandbox,
+                )
                 result = validators.output_validator(result)
-                store.write_event("execution_succeeded", session.id, name, f"duration_ms={exec_ms:.1f}")
-                break
-            except BaseException as exc:  # noqa: BLE001
-                last_exc = exc
-                store.write_event("execution_failed", session.id, name, f"{exc.__class__.__name__}: {exc}")
+            except (ExecutionError, SandboxViolation, ValidationError) as exc:
+                store.write_event(
+                    "execution_failed", session.id, name, f"{type(exc).__name__}: {exc}"
+                )
                 if attempt >= attempts - 1:
                     raise
-                # Repair attempt: ask model with minimal error context
                 repair_prompt = (
-                    f"The previous generated function raised {exc.__class__.__name__}: {exc}. "
+                    f"The previous generated function raised {type(exc).__name__}: {exc}. "
                     f"Return a fixed function for signature: {spec.contracts.signature}"
                 )
-                bundle = bundle_prompt(spec, cfg, session_prompt=repair_prompt, start_path=base)
-                store.write_event("generation_requested", session.id, name, "repair")
-                gen_start = time.perf_counter()
-                art_code = client.generate_code(bundle, cfg)
-                gen_ms = (time.perf_counter() - gen_start) * 1000.0
-                store.put(key, art_code)
-                store.write_event("generation_succeeded", session.id, name, f"repair duration_ms={gen_ms:.1f}")
-        # Optional GC after use (best-effort)
-        try:
-            store.purge_expired(cfg.sessions.ttl)
-        except Exception:
-            pass
-        return result
+                code = generate(repair_prompt, note="repair")
+                continue
+            elapsed = (time.perf_counter() - started) * 1000.0
+            store.write_event("execution_succeeded", session.id, name, f"duration_ms={elapsed:.1f}")
+            return result
+        raise AssertionError("unreachable")  # pragma: no cover
 
-if TYPE_CHECKING:  # pragma: no cover
-    from .specs import FunctionSpec
+    # ------------------------------------------------------------------ helpers
 
+    @staticmethod
+    def _open_store(cfg: SpliceConfig, base: Path) -> ArtifactStore:
+        return ArtifactStore(database_path=resolve_database_path(cfg, base))
 
+    @staticmethod
+    def _cache_key(
+        session: Session, name: str, spec: FunctionSpec, prompt: str | None, base: Path
+    ) -> ArtifactKey:
+        spec_path = base / "functions" / f"{name}.yaml"
+        config_path = base / "splice.yaml"
+        docs = "\n\n".join(c for _, c in load_context_docs(spec.context_docs, base))
+        return ArtifactKey(
+            session_id=session.id,
+            function_name=name,
+            prompt_hash=ArtifactStore.hash_prompt(prompt if prompt is not None else spec.prompt),
+            spec_hash=ArtifactStore.hash_spec_yaml(
+                spec_path.read_text() if spec_path.exists() else ""
+            ),
+            context_hash=ArtifactStore.hash_context_docs(docs),
+            config_hash=ArtifactStore.hash_config_yaml(
+                config_path.read_text() if config_path.exists() else ""
+            ),
+        )
+
+    @staticmethod
+    def _cached_code(
+        store: ArtifactStore, key: ArtifactKey, cfg: SpliceConfig, *, prompt_given: bool
+    ) -> str | None:
+        art = store.get_fresh(key, cfg.sessions.ttl)
+        if art is not None:
+            return art.code
+        if prompt_given:
+            return None
+        latest = store.get_latest_for_session(
+            session_id=key.session_id,
+            function_name=key.function_name,
+            spec_hash=key.spec_hash,
+            context_hash=key.context_hash,
+            config_hash=key.config_hash,
+        )
+        return latest.code if latest is not None else None

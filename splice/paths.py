@@ -1,50 +1,44 @@
+"""Locate the project's ``.splice/`` workspace directory."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
 from .errors import WorkspaceNotFoundError
 
-def find_splice_directory(start_path: Path | None = None) -> Path:
-    """Locate the nearest `.splice/` directory by walking up from start_path.
 
-    If none is found, return the conventional location under the current working directory.
-    Phase 0: this is a pure resolver; it does not create any directories.
-    """
-
-    current: Path = Path(start_path or Path.cwd()).resolve()
-
-    # If caller already passed the `.splice/` directory itself, use it as-is.
-    if current.is_dir() and current.name == ".splice":
-        return current
-
+def _walk_up(start_path: Path | None) -> tuple[Path, Path | None]:
+    start = Path(start_path or Path.cwd()).resolve()
+    if start.name == ".splice" and start.is_dir():
+        return start, start
+    current = start
     while True:
         candidate = current / ".splice"
         if candidate.is_dir():
-            return candidate
+            return start, candidate
         if current == current.parent:
-            break
+            return start, None
         current = current.parent
 
-    # Fallback to the CWD convention
-    return Path.cwd() / ".splice"
 
+def find_splice_directory(start_path: Path | None = None) -> Path:
+    """Return the nearest existing ``.splice/`` at or above ``start_path``.
+
+    If there is none, return ``<start_path>/.splice`` (the place ``splice init``
+    would create it). This function never creates directories.
+    """
+
+    start, found = _walk_up(start_path)
+    return found if found is not None else start / ".splice"
 
 
 def require_splice_directory(start_path: Path | None = None) -> Path:
-    """Locate `.splice/` by walking up from start_path; error if not found.
+    """Like :func:`find_splice_directory` but raise if no workspace exists."""
 
-    Raises WorkspaceNotFoundError with guidance to run `splice init`.
-    """
-
-    current: Path = Path(start_path or Path.cwd()).resolve()
-    while True:
-        candidate = current / ".splice"
-        if candidate.is_dir():
-            return candidate
-        if current == current.parent:
-            break
-        current = current.parent
-    raise WorkspaceNotFoundError(
-        f"No .splice/ directory found from {current}. Run 'splice init' in your project root."
-    )
-
+    start, found = _walk_up(start_path)
+    if found is None:
+        raise WorkspaceNotFoundError(
+            f"No .splice/ directory found at or above {start}. "
+            "Run 'splice init' in your project root."
+        )
+    return found

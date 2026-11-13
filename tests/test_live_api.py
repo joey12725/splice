@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
 from splice.client import OpenRouterClient
-from splice.config import SpliceConfig, ModelConfig
-from splice.prompt import PromptBundle, bundle_prompt
-from splice.specs import Contracts, FunctionSpec
+from splice.config import ModelConfig, SpliceConfig
 from splice.executor import Executor
-
+from splice.prompt import bundle_prompt
+from splice.specs import Contracts, FunctionSpec
 
 pytestmark = pytest.mark.live
 
@@ -23,9 +22,13 @@ def _require_live() -> None:
         pytest.skip("Set SPLICE_RUN_LIVE_TESTS=1 to run live API tests")
 
 
-def _make_spec(name: str, signature: str, inputs: dict[str, str], output: str, system_sig: str | None = None) -> FunctionSpec:
+def _make_spec(
+    name: str, signature: str, inputs: dict[str, str], output: str, system_sig: str | None = None
+) -> FunctionSpec:
     contracts = Contracts(signature=signature, inputs=inputs, output=output, pydantic={})
-    sys_prompt = f"Output exactly one Python function:\n{system_sig or signature}"  # stronger guidance
+    sys_prompt = (
+        f"Output exactly one Python function:\n{system_sig or signature}"  # stronger guidance
+    )
     return FunctionSpec(
         name=name,
         version="0.0.1",
@@ -109,9 +112,7 @@ def test_live_numpy_matmul() -> None:
     )
     code = _generate_code_text(
         spec,
-        task_prompt=(
-            "Use numpy to return matrix multiplication of a and b."
-        ),
+        task_prompt=("Use numpy to return matrix multiplication of a and b."),
     )
 
     a = np.array([[1, 2], [3, 4]])
@@ -122,5 +123,3 @@ def test_live_numpy_matmul() -> None:
     assert isinstance(out, np.ndarray)
     assert out.shape == (2, 2)
     assert (out == a @ b).all()
-
-

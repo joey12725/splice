@@ -1,8 +1,10 @@
+"""Deterministic prompt assembly."""
+
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from .config import SpliceConfig
 from .paths import require_splice_directory
@@ -11,15 +13,12 @@ from .specs import FunctionSpec
 
 @dataclass(frozen=True)
 class PromptBundle:
-    """Deterministic prompt bundle for model generation (Phase 2).
-
-    The bundle is a single text blob assembled from config/spec/session inputs.
-    """
+    """Deterministic prompt text assembled from config, spec, docs and the session prompt."""
 
     text: str
 
 
-def _load_context_docs(doc_names: Iterable[str], start_path: Path | None) -> list[tuple[str, str]]:
+def load_context_docs(doc_names: Iterable[str], start_path: Path | None) -> list[tuple[str, str]]:
     """Load context doc contents from `.splice/context/`.
 
     Each entry in `doc_names` may be a filename (ending with .md) or a bare name.
@@ -35,11 +34,13 @@ def _load_context_docs(doc_names: Iterable[str], start_path: Path | None) -> lis
         if path.exists():
             try:
                 content = path.read_text()
-            except Exception:
-                # Skip unreadable docs silently for Phase 2; later phases may log
+            except OSError:
                 continue
             loaded.append((filename, content))
     return loaded
+
+
+_load_context_docs = load_context_docs  # backwards-compatible alias
 
 
 def bundle_prompt(
@@ -64,7 +65,7 @@ def bundle_prompt(
     output_line = spec.contracts.output
 
     # Context docs
-    context_pairs = _load_context_docs(spec.context_docs, start_path)
+    context_pairs = load_context_docs(spec.context_docs, start_path)
 
     # Examples
     examples_section: list[str] = []
@@ -90,22 +91,24 @@ def bundle_prompt(
     parts: list[str] = []
 
     # System prompt first
-    parts.extend(["SYSTEM PROMPT:", system_prompt, ""]) 
+    parts.extend(["SYSTEM PROMPT:", system_prompt, ""])
 
     # Contracts for clarity
-    parts.extend([
-        "CONTRACT SIGNATURE:",
-        "```python",
-        signature,
-        "```",
-        "",
-        "CONTRACT TYPES:",
-        "Inputs:",
-        *inputs_lines,
-        "Output:",
-        f"- {output_line}",
-        "",
-    ])
+    parts.extend(
+        [
+            "CONTRACT SIGNATURE:",
+            "```python",
+            signature,
+            "```",
+            "",
+            "CONTRACT TYPES:",
+            "Inputs:",
+            *inputs_lines,
+            "Output:",
+            f"- {output_line}",
+            "",
+        ]
+    )
 
     # Context docs if any
     if context_pairs:
@@ -114,7 +117,7 @@ def bundle_prompt(
             parts.extend([f"# {filename}", content.strip(), ""])  # keep doc titles simple
 
     # Session-scoped prompt (active)
-    parts.extend(["TASK PROMPT:", active_prompt, ""]) 
+    parts.extend(["TASK PROMPT:", active_prompt, ""])
 
     # Examples, if any
     if examples_section:
@@ -123,12 +126,12 @@ def bundle_prompt(
         parts.append("")
 
     # Final strict instruction (belt-and-suspenders)
-    parts.extend([
-        "FINAL INSTRUCTION:",
-        "Return exactly one valid Python function that matches the contract. No prose.",
-    ])
+    parts.extend(
+        [
+            "FINAL INSTRUCTION:",
+            "Return exactly one valid Python function that matches the contract. No prose.",
+        ]
+    )
 
     text = "\n".join(parts).rstrip() + "\n"
     return PromptBundle(text=text)
-
-

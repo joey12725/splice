@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import textwrap
 from pathlib import Path
 
-import textwrap
-
-from splice.config import SpliceConfig, ModelConfig
+from splice.config import ModelConfig, SpliceConfig
 from splice.prompt import bundle_prompt
 from splice.specs import Contracts, FunctionSpec
 
@@ -104,5 +102,3 @@ def test_includes_contracts_and_examples_and_context(tmp_path: Path):
     assert "Add 2 and 3" in text
     assert "```python" in text
     assert "def add(a: int, b: int) -> int:" in text
-
-

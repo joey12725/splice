@@ -1,7 +1,9 @@
+"""Function specs (``.splice/functions/<name>.yaml``)."""
+
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -39,13 +41,7 @@ def _require_field(obj: dict[str, Any], key: str, ctx: str) -> Any:
 
 
 def _validate_examples(examples: list[dict[str, str]], signature: str) -> None:
-    """Phase 9: optionally verify examples are shaped as function snippets.
-
-    We perform a lightweight check: ensure each example function contains a
-    `def <name>(` matching the signature's function name. This avoids strict
-    parsing but catches obvious mismatches.
-    """
-    import re
+    """Check that each example defines a function with the contract's name."""
 
     m = re.match(r"\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", signature)
     if not m:
@@ -59,7 +55,6 @@ def _validate_examples(examples: list[dict[str, str]], signature: str) -> None:
             raise SpecError(f"Example {idx} function does not match signature name '{fn_name}'")
 
 
-@lru_cache(maxsize=128)
 def load_function_spec(name: str, start_path: Path | None = None) -> FunctionSpec:
     """Load a function spec YAML by name from `.splice/functions/<name>.yaml`."""
 
@@ -69,15 +64,19 @@ def load_function_spec(name: str, start_path: Path | None = None) -> FunctionSpe
         raise SpecNotFoundError(f"Spec not found: {spec_path}")
 
     try:
-        data: dict[str, Any] = yaml.safe_load(spec_path.read_text()) or {}
-    except Exception as exc:  # pragma: no cover
+        data = yaml.safe_load(spec_path.read_text()) or {}
+    except yaml.YAMLError as exc:
         raise SpecError(f"Failed to parse spec at {spec_path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SpecError(f"Spec at {spec_path} must be a mapping")
 
     # Basic validation
     if data.get("name") != name:
         raise SpecError("Spec 'name' must match the filename")
 
     contracts_obj = _require_field(data, "contracts", ctx=f"spec '{name}'")
+    if not isinstance(contracts_obj, dict):
+        raise SpecError("contracts must be a mapping")
     signature = _require_field(contracts_obj, "signature", ctx="contracts")
     inputs = _require_field(contracts_obj, "inputs", ctx="contracts")
     output = _require_field(contracts_obj, "output", ctx="contracts")
@@ -111,14 +110,7 @@ def load_function_spec(name: str, start_path: Path | None = None) -> FunctionSpe
     if not isinstance(examples, list):
         raise SpecError("examples must be a list")
 
-    # Phase 9: verify examples reference the correct function name
-    try:
-        _validate_examples(list(examples), signature)
-    except SpecError:
-        raise
-    except Exception:
-        # Non-fatal; only enforce clear mismatches
-        pass
+    _validate_examples(list(examples), signature)
 
     return FunctionSpec(
         name=str(_require_field(data, "name", ctx="spec")),
@@ -131,5 +123,3 @@ def load_function_spec(name: str, start_path: Path | None = None) -> FunctionSpe
         type_sources=list(type_sources),
         examples=list(examples),
     )
-
-

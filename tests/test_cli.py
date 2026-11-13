@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from splice.cli import cmd_init, cmd_docgen, cmd_cache_purge
-from splice.docgen import DocSource
+from splice.cli import cmd_cache_purge, cmd_docgen, cmd_init
 
 
 def test_cli_init_creates_scaffold(tmp_path: Path) -> None:
@@ -23,5 +22,3 @@ def test_cli_docgen_and_cache_purge(tmp_path: Path) -> None:
     # Cache purge works on empty DB
     deleted = cmd_cache_purge(start_path=tmp_path)
     assert isinstance(deleted, int)
-
-

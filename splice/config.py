@@ -1,3 +1,5 @@
+"""Workspace configuration (``.splice/splice.yaml``)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,26 +8,30 @@ from typing import Any
 
 import yaml
 
-from .errors import ConfigError
+from .errors import ConfigError, WorkspaceNotFoundError
 from .paths import require_splice_directory
 
+DEFAULT_MODEL = "openai/gpt-5-mini"
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a code generator. Output exactly one valid Python function that\n"
+    "matches the declared signature and contracts. No explanations."
+)
 DEFAULT_ALLOW_IMPORTS: list[str] = ["math", "statistics", "numpy"]
+REASONING_LEVELS = {"minimal": 0, "low": 1, "medium": 2, "high": 3}
+SANDBOX_BACKENDS = ("auto", "process", "seatbelt", "bubblewrap", "docker", "podman")
 
 
 @dataclass
 class ModelConfig:
-    name: str = "openai/gpt-5-mini"
+    name: str = DEFAULT_MODEL
     temperature: float = 0.2
     reasoning: int = 1
-    system_prompt: str = (
-        "You are a code generator. Output exactly one valid Python function that\n"
-        "matches the declared signature and contracts. No explanations."
-    )
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
 
 @dataclass
 class SessionsConfig:
-    store: str = "sqlite"  # memory | sqlite | redis
+    store: str = "sqlite"  # memory | sqlite | redis (sqlite is the implemented store)
     ttl: str = "24h"
 
 
@@ -38,10 +44,21 @@ class LoggingConfig:
 
 @dataclass
 class SandboxConfig:
+    backend: str = "auto"
     allow_imports: list[str] = field(default_factory=lambda: list(DEFAULT_ALLOW_IMPORTS))
     allow_fs: bool = False
     allow_net: bool = False
     allow_subprocess: bool = False
+    restricted_python: bool = True
+    timeout_seconds: float = 10.0
+    cpu_seconds: int = 10
+    memory_mb: int = 512
+    max_file_size_mb: int = 16
+    max_open_files: int = 64
+    max_output_kb: int = 1024
+    env_passthrough: list[str] = field(default_factory=list)
+    python: str | None = None
+    container_image: str = "python:3.12-slim"
 
 
 @dataclass
@@ -55,6 +72,50 @@ class RetriesConfig:
     repair: int = 1
 
 
+def _section(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key) or {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"'{key}' must be a mapping")
+    return value
+
+
+def _bool(d: dict[str, Any], key: str, default: bool) -> bool:
+    value = d.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(f"'{key}' must be true or false")
+    return value
+
+
+def _number(d: dict[str, Any], key: str, default: float, kind: type = int) -> Any:
+    value = d.get(key, default)
+    try:
+        number = kind(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"'{key}' must be a number") from exc
+    if number < 0:
+        raise ConfigError(f"'{key}' must not be negative")
+    return number
+
+
+def _str_list(d: dict[str, Any], key: str, default: list[str]) -> list[str]:
+    value = d.get(key, default)
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise ConfigError(f"sandbox.{key} must be a list of strings")
+    return list(value)
+
+
+def parse_reasoning(raw: Any) -> int:
+    if isinstance(raw, str):
+        level = raw.strip().lower()
+        if level in REASONING_LEVELS:
+            return REASONING_LEVELS[level]
+        if level.lstrip("-").isdigit():
+            return int(level)
+    elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return int(raw)
+    raise ConfigError("model.reasoning must be an integer or one of: minimal | low | medium | high")
+
+
 @dataclass
 class SpliceConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -65,113 +126,97 @@ class SpliceConfig:
     retries: RetriesConfig = field(default_factory=RetriesConfig)
 
     @staticmethod
-    def load(config_path: str | None = None, start_path: Path | None = None) -> SpliceConfig:
-        """Load config from YAML, applying defaults and validation."""
+    def load(config_path: str | Path | None = None, start_path: Path | None = None) -> SpliceConfig:
+        """Load config from YAML, applying defaults and validation.
 
-        # Resolve path: explicit wins; else find .splice/splice.yaml
+        With no explicit path, ``.splice/splice.yaml`` is located by walking up
+        from ``start_path`` (or the CWD). Missing files yield the defaults.
+        """
+
         if config_path is not None:
             path = Path(config_path)
         else:
-            base = require_splice_directory(start_path)
-            path = base / "splice.yaml"
+            try:
+                path = require_splice_directory(start_path) / "splice.yaml"
+            except WorkspaceNotFoundError:
+                return SpliceConfig()
 
         if not path.exists():
-            # Return defaults if file isn't present yet
             return SpliceConfig()
 
         try:
-            data: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
-        except Exception as exc:  # pragma: no cover
+            data = yaml.safe_load(path.read_text()) or {}
+        except yaml.YAMLError as exc:
             raise ConfigError(f"Failed to parse config at {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ConfigError(f"Config at {path} must be a mapping")
+        return SpliceConfig.from_dict(data)
 
-        # Construct nested configs with defaults and overrides
-        def model_from(d: dict[str, Any]) -> ModelConfig:
-            # Map reasoning: accept int or enum string minimal|low|medium|high
-            raw_reasoning = d.get("reasoning", ModelConfig.reasoning)
-            reasoning_value: int
-            if isinstance(raw_reasoning, str):
-                level = raw_reasoning.strip().lower()
-                mapping = {
-                    "minimal": 0,
-                    "low": 1,
-                    "medium": 2,
-                    "high": 3,
-                }
-                if level in mapping:
-                    reasoning_value = mapping[level]
-                else:
-                    raise ConfigError(
-                        "model.reasoning must be an integer or one of: minimal | low | medium | high"
-                    )
-            else:
-                try:
-                    reasoning_value = int(raw_reasoning)
-                except Exception as exc:  # noqa: BLE001
-                    raise ConfigError(
-                        "model.reasoning must be an integer or one of: minimal | low | medium | high"
-                    ) from exc
-
-            return ModelConfig(
-                name=str(d.get("name", ModelConfig.name)),
-                temperature=float(d.get("temperature", ModelConfig.temperature)),
-                reasoning=reasoning_value,
-                system_prompt=str(d.get("system_prompt", ModelConfig.system_prompt)),
-            )
-
-        def sessions_from(d: dict[str, Any]) -> SessionsConfig:
-            store = str(d.get("store", SessionsConfig.store))
-            if store not in {"memory", "sqlite", "redis"}:
-                raise ConfigError("sessions.store must be one of: memory | sqlite | redis")
-            return SessionsConfig(store=store, ttl=str(d.get("ttl", SessionsConfig.ttl)))
-
-        def logging_from(d: dict[str, Any]) -> LoggingConfig:
-            return LoggingConfig(
-                database=str(d.get("database", LoggingConfig.database)),
-                log_inputs=bool(d.get("log_inputs", LoggingConfig.log_inputs)),
-                log_outputs=bool(d.get("log_outputs", LoggingConfig.log_outputs)),
-            )
-
-        def sandbox_from(d: dict[str, Any]) -> SandboxConfig:
-            allow_imports = d.get("allow_imports", DEFAULT_ALLOW_IMPORTS)
-            is_list = isinstance(allow_imports, list)
-            has_only_str = is_list and all(isinstance(x, str) for x in allow_imports)
-            if not (is_list and has_only_str):
-                raise ConfigError(
-                    "sandbox.allow_imports must be a list of strings"
-                )
-            return SandboxConfig(
-                allow_imports=list(allow_imports),
-                allow_fs=bool(d.get("allow_fs", SandboxConfig.allow_fs)),
-                allow_net=bool(d.get("allow_net", SandboxConfig.allow_net)),
-                allow_subprocess=bool(d.get("allow_subprocess", SandboxConfig.allow_subprocess)),
-            )
-
-        def dependencies_from(d: dict[str, Any]) -> DependenciesConfig:
-            policy = str(d.get("policy", DependenciesConfig.policy))
-            if policy not in {"off", "if-present", "allow"}:
-                raise ConfigError("dependencies.policy must be one of: off | if-present | allow")
-            return DependenciesConfig(policy=policy)
-
-        def retries_from(d: dict[str, Any]) -> RetriesConfig:
-            return RetriesConfig(
-                generation=int(d.get("generation", RetriesConfig.generation)),
-                repair=int(d.get("repair", RetriesConfig.repair)),
-            )
-
-        model_cfg = model_from(data.get("model", {}))
-        sessions_cfg = sessions_from(data.get("sessions", {}))
-        logging_cfg = logging_from(data.get("logging", {}))
-        sandbox_cfg = sandbox_from(data.get("sandbox", {}))
-        deps_cfg = dependencies_from(data.get("dependencies", {}))
-        retries_cfg = retries_from(data.get("retries", {}))
-
-        return SpliceConfig(
-            model=model_cfg,
-            sessions=sessions_cfg,
-            logging=logging_cfg,
-            sandbox=sandbox_cfg,
-            dependencies=deps_cfg,
-            retries=retries_cfg,
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> SpliceConfig:
+        m = _section(data, "model")
+        model = ModelConfig(
+            name=str(m.get("name", DEFAULT_MODEL)),
+            temperature=_number(m, "temperature", 0.2, float),
+            reasoning=parse_reasoning(m.get("reasoning", 1)),
+            system_prompt=str(m.get("system_prompt", DEFAULT_SYSTEM_PROMPT)),
         )
 
+        s = _section(data, "sessions")
+        store = str(s.get("store", "sqlite"))
+        if store not in {"memory", "sqlite", "redis"}:
+            raise ConfigError("sessions.store must be one of: memory | sqlite | redis")
+        sessions = SessionsConfig(store=store, ttl=str(s.get("ttl", "24h")))
 
+        lg = _section(data, "logging")
+        logging_cfg = LoggingConfig(
+            database=str(lg.get("database", LoggingConfig.database)),
+            log_inputs=_bool(lg, "log_inputs", False),
+            log_outputs=_bool(lg, "log_outputs", False),
+        )
+
+        sb = _section(data, "sandbox")
+        backend = str(sb.get("backend", "auto"))
+        if backend not in SANDBOX_BACKENDS:
+            from .sandbox import _BACKENDS  # custom registered backends are valid too
+
+            if backend not in _BACKENDS:
+                raise ConfigError(f"sandbox.backend must be one of: {' | '.join(SANDBOX_BACKENDS)}")
+        python = sb.get("python")
+        sandbox = SandboxConfig(
+            backend=backend,
+            allow_imports=_str_list(sb, "allow_imports", DEFAULT_ALLOW_IMPORTS),
+            allow_fs=_bool(sb, "allow_fs", False),
+            allow_net=_bool(sb, "allow_net", False),
+            allow_subprocess=_bool(sb, "allow_subprocess", False),
+            restricted_python=_bool(sb, "restricted_python", True),
+            timeout_seconds=_number(sb, "timeout_seconds", 10.0, float),
+            cpu_seconds=_number(sb, "cpu_seconds", 10),
+            memory_mb=_number(sb, "memory_mb", 512),
+            max_file_size_mb=_number(sb, "max_file_size_mb", 16),
+            max_open_files=_number(sb, "max_open_files", 64),
+            max_output_kb=_number(sb, "max_output_kb", 1024),
+            env_passthrough=_str_list(sb, "env_passthrough", []),
+            python=str(python) if python else None,
+            container_image=str(sb.get("container_image", SandboxConfig.container_image)),
+        )
+
+        dp = _section(data, "dependencies")
+        policy = str(dp.get("policy", "if-present"))
+        if policy not in {"off", "if-present", "allow"}:
+            raise ConfigError("dependencies.policy must be one of: off | if-present | allow")
+
+        rt = _section(data, "retries")
+        retries = RetriesConfig(
+            generation=_number(rt, "generation", 2),
+            repair=_number(rt, "repair", 1),
+        )
+
+        return SpliceConfig(
+            model=model,
+            sessions=sessions,
+            logging=logging_cfg,
+            sandbox=sandbox,
+            dependencies=DependenciesConfig(policy=policy),
+            retries=retries,
+        )

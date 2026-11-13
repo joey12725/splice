@@ -21,5 +21,3 @@ def test_find_splice_directory() -> None:
 
     path = find_splice_directory()
     assert isinstance(path, Path)
-
-

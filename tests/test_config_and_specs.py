@@ -99,5 +99,3 @@ def test_spec_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     )
     with pytest.raises(SpecError):
         load_function_spec("bad")
-
-

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-import yaml
-import pytest
 
-from splice.specs import load_function_spec
+import pytest
+import yaml
+
 from splice.errors import SpecError
+from splice.specs import load_function_spec
 
 
 def _write_spec(tmp_path: Path, name: str, data: dict) -> Path:
@@ -56,5 +57,3 @@ def test_example_verification_allows_good_name(tmp_path: Path) -> None:
     _write_spec(tmp_path, name, data)
     spec = load_function_spec(name, start_path=tmp_path)
     assert spec.name == name
-
-

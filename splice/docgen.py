@@ -1,21 +1,21 @@
+"""Generate Markdown context docs for Python classes (``.splice/context/<Name>.md``)."""
+
 from __future__ import annotations
 
+import importlib
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .paths import require_splice_directory
+from .paths import find_splice_directory
 
 
 def _import_from_string(path: str) -> Any:
     module_name, _, attr = path.rpartition(".")
     if not module_name:
-        return __import__(path)
-    import importlib
-
-    mod = importlib.import_module(module_name)
-    return getattr(mod, attr)
+        return importlib.import_module(path)
+    return getattr(importlib.import_module(module_name), attr)
 
 
 def _introspect_class(cls: type) -> str:
@@ -49,14 +49,14 @@ class DocSource:
 
 
 def generate_docs(sources: list[DocSource], *, start_path: Path | None = None) -> list[Path]:
-    """Generate `.splice/context/<Name>.md` files for provided sources (Phase 7).
+    """Write ``.splice/context/<Name>.md`` for each source and return the paths.
 
-    - For `doc_strategy: class`, import the class/object and write a simple Markdown doc.
-    - Idempotent: if file exists, leave it as-is.
-    Returns a list of paths that exist after the call.
+    ``doc_strategy: class`` introspects the class (or the object's type) into a
+    short Markdown summary. Existing files are left untouched, so hand-edited
+    docs survive re-runs.
     """
 
-    base = require_splice_directory(start_path)
+    base = find_splice_directory(start_path)
     ctx_dir = base / "context"
     ctx_dir.mkdir(parents=True, exist_ok=True)
 
@@ -85,5 +85,3 @@ def generate_docs(sources: list[DocSource], *, start_path: Path | None = None) -
         written.append(out_path)
 
     return written
-
-
